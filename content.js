@@ -1,5 +1,6 @@
 class CognitoTableContentScript {
     constructor() {
+        console.log('CognitoTableContentScript constructor called');
         this.observedTables = new Map();
         this.mutationObserver = null;
         this.debounceTimer = null;
@@ -8,9 +9,11 @@ class CognitoTableContentScript {
     }
 
     init() {
+        console.log('CognitoTableContentScript initializing...');
         this.setupMutationObserver();
         this.setupMessageListener();
         this.performInitialScan();
+        console.log('CognitoTableContentScript initialization complete');
     }
 
     setupMutationObserver() {
@@ -27,10 +30,25 @@ class CognitoTableContentScript {
 
     setupMessageListener() {
         chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+            console.log('Content script received message:', request);
             switch (request.action) {
                 case 'getTables':
-                    this.scanForTables().then(tables => {
-                        sendResponse({ tables: tables });
+                    console.log('Processing getTables request...');
+                    // For dynamic content, wait a bit and scan multiple times
+                    this.scanWithRetry().then(tables => {
+                        console.log('scanWithRetry completed, found:', tables.length, 'tables');
+                        
+                        // Include iframe information if no tables found
+                        const response = { tables: tables };
+                        if (tables.length === 0 && this.detectedIframes && this.detectedIframes.length > 0) {
+                            response.iframes = Array.from(this.detectedIframes).map(iframe => ({
+                                src: iframe.src,
+                                title: iframe.title,
+                                sameOrigin: this.isSameOrigin(iframe.src)
+                            }));
+                        }
+                        
+                        sendResponse(response);
                     }).catch(error => {
                         console.error('Error getting tables:', error);
                         sendResponse({ tables: [], error: error.message });
@@ -101,9 +119,83 @@ class CognitoTableContentScript {
         }
     }
 
+    async scanWithRetry(maxRetries = 3, delay = 1000) {
+        console.log('Starting scanWithRetry...');
+        
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            console.log(`Scan attempt ${attempt}/${maxRetries}`);
+            
+            // Wait for any pending DOM updates
+            await this.waitForDOMStability();
+            
+            const tables = await this.scanForTables();
+            console.log(`Attempt ${attempt} found ${tables.length} tables`);
+            
+            // If we found tables, return them
+            if (tables.length > 0) {
+                return tables;
+            }
+            
+            // If no tables found and this isn't the last attempt, wait and try again
+            if (attempt < maxRetries) {
+                console.log(`No tables found, waiting ${delay}ms before retry...`);
+                await this.sleep(delay);
+                
+                // Increase delay for next attempt (exponential backoff)
+                delay = Math.min(delay * 1.5, 3000);
+            }
+        }
+        
+        console.log('All scan attempts completed, no tables found');
+        return [];
+    }
+
+    async waitForDOMStability(timeout = 500) {
+        return new Promise((resolve) => {
+            let timer;
+            const resetTimer = () => {
+                clearTimeout(timer);
+                timer = setTimeout(resolve, timeout);
+            };
+            
+            // Watch for DOM changes
+            const observer = new MutationObserver(resetTimer);
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true,
+                attributes: true
+            });
+            
+            // Initial timer
+            resetTimer();
+            
+            // Clean up observer after timeout
+            setTimeout(() => {
+                observer.disconnect();
+                clearTimeout(timer);
+                resolve();
+            }, timeout * 3); // Max wait time
+        });
+    }
+
+    sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
     async scanForTables() {
         const tables = [];
         let tableId = 0;
+
+        // Debug: Show what elements are on the page
+        console.log('Page body children count:', document.body.children.length);
+        console.log('Total divs on page:', document.querySelectorAll('div').length);
+        console.log('Elements with "table" in class:', document.querySelectorAll('[class*="table"]').length);
+        console.log('Elements with "grid" in class:', document.querySelectorAll('[class*="grid"]').length);
+        console.log('Elements with "row" in class:', document.querySelectorAll('[class*="row"]').length);
+        
+        // Debug: Sample some elements to understand the structure
+        this.debugPageStructure();
+        this.checkForIframes();
 
         const explicitTables = this.findExplicitTables();
         for (const table of explicitTables) {
@@ -141,21 +233,41 @@ class CognitoTableContentScript {
     }
 
     findExplicitTables() {
-        return Array.from(document.querySelectorAll('table'))
-            .filter(table => this.isVisibleElement(table));
+        const tables = document.querySelectorAll('table');
+        console.log('Found', tables.length, 'total table elements');
+        
+        const visibleTables = Array.from(tables).filter(table => this.isVisibleElement(table));
+        console.log('Found', visibleTables.length, 'visible tables');
+        
+        return visibleTables;
     }
 
     async findImplicitTables() {
         const candidates = [];
-        const containers = document.querySelectorAll('div, ul, ol, section, article, main');
+        // Look for common React/modern web patterns
+        const containers = document.querySelectorAll('div, ul, ol, section, article, main, [class*="table"], [class*="grid"], [class*="list"], [class*="row"], [role="table"], [role="grid"]');
+        console.log('Checking', containers.length, 'potential table containers for implicit tables');
         
+        let checkedContainers = 0;
         for (const container of containers) {
             if (!this.isVisibleElement(container)) continue;
+            checkedContainers++;
             
             const children = Array.from(container.children);
             if (children.length < 2) continue;
 
             const analysis = await this.analyzeContainerForTablePattern(container, children);
+            
+            // Debug: Log containers with some potential
+            if (analysis.confidence > 0.3) {
+                console.log('Potential table container:', {
+                    selector: this.getElementSelector(container),
+                    children: children.length,
+                    confidence: analysis.confidence,
+                    analysis: analysis
+                });
+            }
+            
             if (analysis.confidence > 0.6) {
                 candidates.push({
                     element: container,
@@ -166,7 +278,17 @@ class CognitoTableContentScript {
             }
         }
 
-        return candidates.sort((a, b) => b.confidence - a.confidence).slice(0, 10);
+        console.log('Checked', checkedContainers, 'visible containers, found', candidates.length, 'candidates');
+        const sortedCandidates = candidates.sort((a, b) => b.confidence - a.confidence).slice(0, 10);
+        
+        // If no tables found, check for iframes
+        if (sortedCandidates.length === 0) {
+            const iframes = this.checkForIframes();
+            // Store iframe information for popup to access
+            this.detectedIframes = iframes;
+        }
+        
+        return sortedCandidates;
     }
 
     async analyzeContainerForTablePattern(container, children) {
@@ -776,15 +898,83 @@ class CognitoTableContentScript {
         
         this.observedTables.clear();
     }
+
+    debugPageStructure() {
+        console.log('=== PAGE STRUCTURE DEBUG ===');
+        
+        // Find elements that might contain tabular data
+        const potentialContainers = [
+            ...document.querySelectorAll('[class*="table"]'),
+            ...document.querySelectorAll('[class*="grid"]'),
+            ...document.querySelectorAll('[class*="list"]'),
+            ...document.querySelectorAll('[class*="row"]'),
+            ...document.querySelectorAll('[class*="data"]'),
+            ...document.querySelectorAll('[class*="item"]')
+        ];
+        
+        console.log('Found', potentialContainers.length, 'potential containers');
+        
+        // Sample first few and show their structure
+        potentialContainers.slice(0, 5).forEach((el, index) => {
+            console.log(`Container ${index + 1}:`, {
+                tagName: el.tagName,
+                className: el.className,
+                childrenCount: el.children.length,
+                textContent: el.textContent.substring(0, 100),
+                selector: this.getElementSelector(el)
+            });
+        });
+        
+        // Look for repeating patterns
+        const bodyChildren = Array.from(document.body.children);
+        console.log('Body children:', bodyChildren.map(el => ({
+            tag: el.tagName,
+            class: el.className,
+            children: el.children.length
+        })));
+    }
+
+    checkForIframes() {
+        console.log('=== IFRAME DETECTION ===');
+        const iframes = document.querySelectorAll('iframe');
+        console.log('Found', iframes.length, 'iframes');
+        
+        iframes.forEach((iframe, index) => {
+            console.log(`Iframe ${index + 1}:`, {
+                src: iframe.src,
+                title: iframe.title,
+                width: iframe.width || iframe.style.width,
+                height: iframe.height || iframe.style.height,
+                sameOrigin: this.isSameOrigin(iframe.src)
+            });
+        });
+
+        return iframes;
+    }
+
+    isSameOrigin(url) {
+        try {
+            const currentOrigin = window.location.origin;
+            const iframeUrl = new URL(url, window.location.href);
+            return iframeUrl.origin === currentOrigin;
+        } catch (e) {
+            return false;
+        }
+    }
 }
 
 let cognitoTable = null;
 
+console.log('CognitoTable content script loading... Document ready state:', document.readyState);
+
 if (document.readyState === 'loading') {
+    console.log('Document still loading, waiting for DOMContentLoaded...');
     document.addEventListener('DOMContentLoaded', () => {
+        console.log('DOMContentLoaded event fired, initializing CognitoTable...');
         cognitoTable = new CognitoTableContentScript();
     });
 } else {
+    console.log('Document already loaded, initializing CognitoTable immediately...');
     cognitoTable = new CognitoTableContentScript();
 }
 

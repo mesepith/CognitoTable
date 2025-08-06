@@ -1,0 +1,117 @@
+main.3191d2b8.js:103 {$$typeof: Symbol(react.element), key: null, ref: null, props: {…}, type: ƒ, …}
+content.js:919 CognitoTable content script loading... Document ready state: interactive
+content.js:928 Document already loaded, initializing CognitoTable immediately...
+content.js:3 CognitoTableContentScript constructor called
+content.js:12 CognitoTableContentScript initializing...
+content.js:179 Page body children count: 2
+content.js:180 Total divs on page: 2
+content.js:181 Elements with "table" in class: 0
+content.js:182 Elements with "grid" in class: 0
+content.js:183 Elements with "row" in class: 0
+content.js:882 === PAGE STRUCTURE DEBUG ===
+content.js:894 Found 0 potential containers
+content.js:909 Body children: (2) [{…}, {…}]
+content.js:225 Found 0 total table elements
+content.js:228 Found 0 visible tables
+content.js:237 Checking 2 potential table containers for implicit tables
+content.js:269 Checked 2 visible containers, found 0 candidates
+content.js:16 CognitoTableContentScript initialization complete
+main.3191d2b8.js:76 ServiceWorker registration successful with scope:  https://umforce.crediq.in/
+content.js:33 Content script received message: {action: 'getTables'}
+content.js:36 Processing getTables request...
+content.js:112 Starting scanWithRetry...
+content.js:115 Scan attempt 1/3
+content.js:179 Page body children count: 2
+content.js:180 Total divs on page: 2
+content.js:181 Elements with "table" in class: 0
+content.js:182 Elements with "grid" in class: 0
+content.js:183 Elements with "row" in class: 0
+content.js:882 === PAGE STRUCTURE DEBUG ===
+content.js:894 Found 0 potential containers
+content.js:909 Body children: (2) [{…}, {…}]
+content.js:225 Found 0 total table elements
+content.js:228 Found 0 visible tables
+content.js:237 Checking 2 potential table containers for implicit tables
+content.js:269 Checked 2 visible containers, found 0 candidates
+content.js:121 Attempt 1 found 0 tables
+content.js:130 No tables found, waiting 1000ms before retry...
+content.js:115 Scan attempt 2/3
+content.js:179 Page body children count: 2
+content.js:180 Total divs on page: 2
+content.js:181 Elements with "table" in class: 0
+content.js:182 Elements with "grid" in class: 0
+content.js:183 Elements with "row" in class: 0
+content.js:882 === PAGE STRUCTURE DEBUG ===
+content.js:894 Found 0 potential containers
+content.js:909 Body children: (2) [{…}, {…}]
+content.js:225 Found 0 total table elements
+content.js:228 Found 0 visible tables
+content.js:237 Checking 2 potential table containers for implicit tables
+content.js:269 Checked 2 visible containers, found 0 candidates
+content.js:121 Attempt 2 found 0 tables
+content.js:130 No tables found, waiting 1500ms before retry...
+content.js:115 Scan attempt 3/3
+content.js:179 Page body children count: 2
+content.js:180 Total divs on page: 2
+content.js:181 Elements with "table" in class: 0
+content.js:182 Elements with "grid" in class: 0
+content.js:183 Elements with "row" in class: 0
+content.js:882 === PAGE STRUCTURE DEBUG ===
+content.js:894 Found 0 potential containers
+content.js:909 Body children: (2) [{…}, {…}]
+content.js:225 Found 0 total table elements
+content.js:228 Found 0 visible tables
+content.js:237 Checking 2 potential table containers for implicit tables
+content.js:269 Checked 2 visible containers, found 0 candidates
+content.js:121 Attempt 3 found 0 tables
+content.js:138 All scan attempts completed, no tables found
+content.js:39 scanWithRetry completed, found: 0 tables
+content.js:33 Content script received message: {action: 'getTables'}
+content.js:36 Processing getTables request...
+content.js:112 Starting scanWithRetry...
+content.js:115 Scan attempt 1/3
+content.js:179 Page body children count: 2
+content.js:180 Total divs on page: 2
+content.js:181 Elements with "table" in class: 0
+content.js:182 Elements with "grid" in class: 0
+content.js:183 Elements with "row" in class: 0
+content.js:882 === PAGE STRUCTURE DEBUG ===
+content.js:894 Found 0 potential containers
+content.js:909 Body children: (2) [{…}, {…}]
+content.js:225 Found 0 total table elements
+content.js:228 Found 0 visible tables
+content.js:237 Checking 2 potential table containers for implicit tables
+content.js:269 Checked 2 visible containers, found 0 candidates
+content.js:121 Attempt 1 found 0 tables
+content.js:130 No tables found, waiting 1000ms before retry...
+content.js:115 Scan attempt 2/3
+content.js:179 Page body children count: 2
+content.js:180 Total divs on page: 2
+content.js:181 Elements with "table" in class: 0
+content.js:182 Elements with "grid" in class: 0
+content.js:183 Elements with "row" in class: 0
+content.js:882 === PAGE STRUCTURE DEBUG ===
+content.js:894 Found 0 potential containers
+content.js:909 Body children: (2) [{…}, {…}]
+content.js:225 Found 0 total table elements
+content.js:228 Found 0 visible tables
+content.js:237 Checking 2 potential table containers for implicit tables
+content.js:269 Checked 2 visible containers, found 0 candidates
+content.js:121 Attempt 2 found 0 tables
+content.js:130 No tables found, waiting 1500ms before retry...
+content.js:115 Scan attempt 3/3
+content.js:179 Page body children count: 2
+content.js:180 Total divs on page: 2
+content.js:181 Elements with "table" in class: 0
+content.js:182 Elements with "grid" in class: 0
+content.js:183 Elements with "row" in class: 0
+content.js:882 === PAGE STRUCTURE DEBUG ===
+content.js:894 Found 0 potential containers
+content.js:909 Body children: (2) [{…}, {…}]
+content.js:225 Found 0 total table elements
+content.js:228 Found 0 visible tables
+content.js:237 Checking 2 potential table containers for implicit tables
+content.js:269 Checked 2 visible containers, found 0 candidates
+content.js:121 Attempt 3 found 0 tables
+content.js:138 All scan attempts completed, no tables found
+content.js:39 scanWithRetry completed, found: 0 tables

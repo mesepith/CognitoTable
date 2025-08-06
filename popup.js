@@ -22,6 +22,7 @@ class CognitoTablePopup {
     async scanCurrentPage() {
         try {
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            console.log('Scanning tab:', tab.url);
             
             // Check if we can access this tab
             if (this.isRestrictedUrl(tab.url)) {
@@ -29,22 +30,39 @@ class CognitoTablePopup {
                 return;
             }
             
-            // Send message to content script to get tables
-            const response = await chrome.tabs.sendMessage(tab.id, { action: 'getTables' });
+            // Show scanning status for dynamic content
+            this.showStatus('Scanning for tables...');
             
-            if (!response || !response.tables) {
-                this.showError('Could not scan page - no response from content script');
+            // Send message to content script to get tables
+            console.log('Sending getTables message to content script...');
+            const response = await chrome.tabs.sendMessage(tab.id, { action: 'getTables' });
+            console.log('Response from content script:', response);
+            
+            if (!response) {
+                this.showError('Could not scan page - content script not responding. Try refreshing the page.');
+                return;
+            }
+            
+            if (response.error) {
+                this.showError('Error from content script: ' + response.error);
+                return;
+            }
+            
+            if (!response.tables) {
+                this.showError('Could not scan page - no tables data returned');
                 return;
             }
 
+            console.log('Found tables:', response.tables.length);
             this.detectedTables = response.tables;
+            this.detectedIframes = response.iframes || [];
             this.updateUI();
         } catch (error) {
             console.error('Error scanning page:', error);
             if (error.message.includes('Cannot access') || error.message.includes('Could not establish connection')) {
-                this.showError('Cannot access this page type');
+                this.showError('Content script not loaded. Try refreshing the page and clicking the extension again.');
             } else {
-                this.showError('Failed to scan page for tables');
+                this.showError('Failed to scan page: ' + error.message);
             }
         }
     }
@@ -84,12 +102,45 @@ class CognitoTablePopup {
         tableList.innerHTML = '';
 
         if (this.detectedTables.length === 0) {
-            tableList.innerHTML = `
+            let noTablesHTML = `
                 <div class="no-tables">
                     <h4>No tables detected</h4>
                     <p>Try using "Deep Scan" or "Manual Selection" to find hidden tabular data.</p>
-                </div>
             `;
+            
+            // Show iframe information if available
+            if (this.detectedIframes && this.detectedIframes.length > 0) {
+                noTablesHTML += `
+                    <div style="margin-top: 15px; padding: 10px; background: #f0f8ff; border-radius: 5px; border-left: 4px solid #667eea;">
+                        <h5 style="margin: 0 0 8px 0; color: #333;">🔍 Tables might be in embedded content:</h5>
+                `;
+                
+                this.detectedIframes.forEach((iframe, index) => {
+                    const domain = new URL(iframe.src).hostname;
+                    noTablesHTML += `
+                        <div style="margin: 5px 0; font-size: 12px;">
+                            <strong>Iframe ${index + 1}:</strong><br>
+                            <span style="color: #666;">${iframe.title || 'Untitled'}</span><br>
+                            <a href="${iframe.src}" target="_blank" style="color: #667eea; text-decoration: none;">
+                                ${domain}
+                            </a>
+                            <span style="color: ${iframe.sameOrigin ? 'green' : 'orange'}; font-size: 11px;">
+                                ${iframe.sameOrigin ? '(Same domain)' : '(Different domain - limited access)'}
+                            </span>
+                        </div>
+                    `;
+                });
+                
+                noTablesHTML += `
+                        <p style="margin: 10px 0 0 0; font-size: 11px; color: #666;">
+                            💡 Tip: Try clicking the iframe link above to extract tables directly.
+                        </p>
+                    </div>
+                `;
+            }
+            
+            noTablesHTML += `</div>`;
+            tableList.innerHTML = noTablesHTML;
             return;
         }
 
@@ -277,6 +328,23 @@ class CognitoTablePopup {
 
     startMultiPageExtraction() {
         alert('Multi-page extraction feature coming soon!');
+    }
+
+    showStatus(message) {
+        const statusEl = document.getElementById('status');
+        const contentEl = document.getElementById('content');
+        
+        if (statusEl) {
+            statusEl.style.display = 'block';
+            statusEl.innerHTML = `
+                <div class="spinner"></div>
+                <span>${message}</span>
+            `;
+        }
+        
+        if (contentEl) {
+            contentEl.style.display = 'none';
+        }
     }
 
     showError(message) {
