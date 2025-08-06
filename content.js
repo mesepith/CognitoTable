@@ -131,9 +131,10 @@ class CognitoTableContentScript {
             const tables = await this.scanForTables();
             console.log(`Attempt ${attempt} found ${tables.length} tables`);
             
-            // If we found tables, return them
+            // If we found tables, check if they might be virtualized and try to get more data
             if (tables.length > 0) {
-                return tables;
+                const enhancedTables = await this.enhanceVirtualizedTables(tables);
+                return enhancedTables;
             }
             
             // If no tables found and this isn't the last attempt, wait and try again
@@ -148,6 +149,442 @@ class CognitoTableContentScript {
         
         console.log('All scan attempts completed, no tables found');
         return [];
+    }
+
+    async enhanceVirtualizedTables(tables) {
+        const enhancedTables = [];
+        
+        for (const table of tables) {
+            const element = document.querySelector(table.element);
+            if (!element) {
+                enhancedTables.push(table);
+                continue;
+            }
+            
+            // Check if this appears to be a virtualized table
+            const isVirtualized = this.detectVirtualizedTable(element);
+            
+            if (isVirtualized) {
+                console.log('Detected virtualized table, attempting to extract complete data...');
+                try {
+                    const completeData = await this.extractVirtualizedTableData(element);
+                    if (completeData && completeData.rows.length > table.data.rows.length) {
+                        console.log(`Enhanced virtualized table: ${table.data.rows.length} -> ${completeData.rows.length} rows`);
+                        enhancedTables.push({
+                            ...table,
+                            data: completeData,
+                            preview: this.generatePreview(completeData)
+                        });
+                    } else {
+                        enhancedTables.push(table);
+                    }
+                } catch (error) {
+                    console.warn('Failed to enhance virtualized table:', error);
+                    enhancedTables.push(table);
+                }
+            } else {
+                enhancedTables.push(table);
+            }
+        }
+        
+        return enhancedTables;
+    }
+
+    detectVirtualizedTable(container) {
+        console.log('Detecting virtualization patterns for container:', container);
+        
+        // Check for common virtualization patterns - made more aggressive
+        const indicators = [
+            // Always assume React tables might be virtualized
+            () => {
+                const hasReactLikeStructure = container.querySelector('[class*="react"], [data-react], [class*="virtual"], [class*="infinite"]');
+                return !!hasReactLikeStructure;
+            },
+            
+            // Look for scrollable containers with limited visible rows
+            () => {
+                const scrollableParent = this.findScrollableParent(container);
+                if (scrollableParent) {
+                    const directChildren = container.children.length;
+                    const allDescendants = container.querySelectorAll('*').length;
+                    // Lowered thresholds to be more aggressive
+                    return allDescendants > 20 && directChildren < 50;
+                }
+                return false;
+            },
+            
+            // Look for viewport-based rendering patterns - more aggressive
+            () => {
+                const viewportHeight = window.innerHeight;
+                const containerHeight = container.offsetHeight;
+                const rowElements = Array.from(container.querySelectorAll('[class*="row"], [class*="item"], [class*="entry"], tr, li'));
+                
+                if (rowElements.length > 3) {
+                    const estimatedRowHeight = containerHeight / rowElements.length;
+                    const estimatedMaxVisibleRows = Math.ceil(viewportHeight / estimatedRowHeight);
+                    
+                    // More aggressive detection - assume most tables with limited visible rows are virtualized
+                    return rowElements.length <= estimatedMaxVisibleRows * 3;
+                }
+                return false;
+            },
+            
+            // Look for transform-based positioning (common in virtualization)
+            () => {
+                const positioned = Array.from(container.querySelectorAll('*')).filter(el => {
+                    const style = window.getComputedStyle(el);
+                    return style.transform && style.transform !== 'none' && 
+                           (style.transform.includes('translateY') || style.transform.includes('translate3d'));
+                });
+                return positioned.length > 0;
+            },
+            
+            // Check if there are indicators of lazy loading or pagination
+            () => {
+                const lazyIndicators = container.querySelectorAll('[class*="lazy"], [class*="load"], [class*="page"], [class*="more"]');
+                return lazyIndicators.length > 0;
+            },
+            
+            // Check for common table library classes
+            () => {
+                const tableLibClasses = [
+                    'react-table', 'react-grid', 'ag-grid', 'data-table',
+                    'material-table', 'ant-table', 'table-virtualized'
+                ];
+                return tableLibClasses.some(className => 
+                    container.querySelector(`[class*="${className}"]`)
+                );
+            },
+            
+            // If table has more than 5 rows, assume it might benefit from virtualization enhancement
+            () => {
+                const rowCount = container.querySelectorAll('tr, [class*="row"], [class*="item"], li').length;
+                return rowCount >= 5;
+            }
+        ];
+        
+        const results = indicators.map((check, index) => {
+            try {
+                const result = check();
+                console.log(`Virtualization indicator ${index + 1}:`, result);
+                return result;
+            } catch (error) {
+                console.warn(`Virtualization check ${index + 1} failed:`, error);
+                return false;
+            }
+        });
+        
+        const isVirtualized = results.some(result => result);
+        console.log('Final virtualization detection result:', isVirtualized);
+        
+        return isVirtualized;
+    }
+
+    async extractVirtualizedTableData(container) {
+        console.log('=== VIRTUALIZED TABLE EXTRACTION ===');
+        console.log('Container:', container);
+        
+        // Try multiple scrollable elements and approaches
+        const scrollTargets = this.findAllScrollableElements(container);
+        console.log('Found scrollable elements:', scrollTargets.length);
+        
+        const allData = { headers: [], rows: [], columnTypes: [] };
+        const seenRows = new Set();
+        let bestResult = null;
+        
+        // Try each scrollable element
+        for (let i = 0; i < scrollTargets.length; i++) {
+            const scrollableElement = scrollTargets[i];
+            const originalScrollTop = scrollableElement.scrollTop;
+            console.log(`Trying scrollable element ${i + 1}:`, scrollableElement.tagName, scrollableElement.className);
+            
+            try {
+                const result = await this.performScrollExtraction(container, scrollableElement);
+                
+                if (result && result.rows.length > 0) {
+                    console.log(`Scrollable element ${i + 1} yielded ${result.rows.length} rows`);
+                    if (!bestResult || result.rows.length > bestResult.rows.length) {
+                        bestResult = result;
+                    }
+                }
+            } catch (error) {
+                console.warn(`Error with scrollable element ${i + 1}:`, error);
+            } finally {
+                scrollableElement.scrollTop = originalScrollTop;
+            }
+        }
+        
+        // If scrolling didn't help much, try alternative approaches
+        if (!bestResult || bestResult.rows.length < 15) {
+            console.log('Trying alternative extraction methods...');
+            
+            // Try simulating zoom out effect
+            const zoomResult = await this.simulateZoomExtraction(container);
+            if (zoomResult && zoomResult.rows.length > (bestResult?.rows.length || 0)) {
+                console.log('Zoom simulation yielded better results:', zoomResult.rows.length);
+                bestResult = zoomResult;
+            }
+            
+            // Try finding all table-like structures in DOM
+            const deepScanResult = await this.performDeepTableScan(container);
+            if (deepScanResult && deepScanResult.rows.length > (bestResult?.rows.length || 0)) {
+                console.log('Deep scan yielded better results:', deepScanResult.rows.length);
+                bestResult = deepScanResult;
+            }
+        }
+        
+        if (bestResult) {
+            console.log(`Final virtualized extraction result: ${bestResult.rows.length} rows`);
+            return bestResult;
+        }
+        
+        console.log('No enhanced results found, returning basic extraction');
+        return await this.analyzeImplicitTable(container);
+    }
+
+    findAllScrollableElements(container) {
+        const scrollableElements = [];
+        
+        // Add window/body scroll
+        if (document.body.scrollHeight > window.innerHeight) {
+            scrollableElements.push(window);
+        }
+        
+        // Find scrollable parents
+        let current = container;
+        let depth = 0;
+        
+        while (current && depth < 15) {
+            const style = window.getComputedStyle(current);
+            const isScrollable = style.overflow === 'auto' || style.overflow === 'scroll' ||
+                               style.overflowY === 'auto' || style.overflowY === 'scroll';
+            
+            if (isScrollable && current.scrollHeight > current.clientHeight) {
+                scrollableElements.push(current);
+            }
+            
+            current = current.parentElement;
+            depth++;
+        }
+        
+        // Also look for scrollable siblings and containers
+        const allScrollable = Array.from(document.querySelectorAll('*')).filter(el => {
+            if (scrollableElements.includes(el)) return false;
+            
+            const style = window.getComputedStyle(el);
+            const isScrollable = style.overflow === 'auto' || style.overflow === 'scroll' ||
+                               style.overflowY === 'auto' || style.overflowY === 'scroll';
+            
+            return isScrollable && el.scrollHeight > el.clientHeight && 
+                   (el.contains(container) || container.contains(el));
+        });
+        
+        scrollableElements.push(...allScrollable.slice(0, 5)); // Limit to 5 additional
+        
+        return scrollableElements;
+    }
+
+    async performScrollExtraction(container, scrollableElement) {
+        const allData = { headers: [], rows: [], columnTypes: [] };
+        const seenRows = new Set();
+        
+        // Get initial data
+        const initialData = await this.analyzeImplicitTable(container);
+        if (initialData) {
+            if (initialData.headers && initialData.headers.length > 0) {
+                allData.headers = initialData.headers;
+            }
+            
+            if (initialData.rows) {
+                initialData.rows.forEach(row => {
+                    const rowKey = row.join('|');
+                    if (!seenRows.has(rowKey)) {
+                        seenRows.add(rowKey);
+                        allData.rows.push(row);
+                    }
+                });
+            }
+        }
+        
+        const isWindow = scrollableElement === window;
+        const maxScroll = isWindow ? 
+            document.body.scrollHeight - window.innerHeight :
+            scrollableElement.scrollHeight - scrollableElement.clientHeight;
+        
+        if (maxScroll <= 0) return allData;
+        
+        // More aggressive scrolling - smaller steps, more attempts
+        const scrollSteps = Math.min(25, Math.ceil(maxScroll / 200)); // Smaller scroll increments
+        
+        console.log(`Performing ${scrollSteps} scroll steps, maxScroll: ${maxScroll}`);
+        
+        for (let step = 1; step <= scrollSteps; step++) {
+            const scrollPosition = (maxScroll / scrollSteps) * step;
+            
+            if (isWindow) {
+                window.scrollTo(0, scrollPosition);
+            } else {
+                scrollableElement.scrollTop = scrollPosition;
+            }
+            
+            // Wait for new content to render with longer delay
+            await this.sleep(300);
+            
+            // Force layout recalculation
+            container.offsetHeight;
+            
+            // Extract data at this scroll position
+            const stepData = await this.analyzeImplicitTable(container);
+            if (stepData && stepData.rows) {
+                let newRowsFound = 0;
+                stepData.rows.forEach(row => {
+                    const rowKey = row.join('|');
+                    if (!seenRows.has(rowKey)) {
+                        seenRows.add(rowKey);
+                        allData.rows.push(row);
+                        newRowsFound++;
+                    }
+                });
+                
+                console.log(`Step ${step}: Found ${newRowsFound} new rows (total: ${allData.rows.length})`);
+            }
+            
+            // Continue even if no new rows found - some virtualization patterns have gaps
+        }
+        
+        allData.columnTypes = this.inferColumnTypes(allData.rows);
+        return allData;
+    }
+
+    async simulateZoomExtraction(container) {
+        console.log('Attempting zoom simulation...');
+        
+        // Temporarily modify viewport and container styles to simulate zoom out
+        const originalTransform = document.body.style.transform;
+        const originalZoom = document.body.style.zoom;
+        const originalWidth = document.body.style.width;
+        const originalHeight = document.body.style.height;
+        
+        try {
+            // Simulate zoom out effect
+            document.body.style.transform = 'scale(0.5)';
+            document.body.style.transformOrigin = '0 0';
+            document.body.style.width = '200%';
+            document.body.style.height = '200%';
+            
+            // Force layout recalculation
+            await this.sleep(500);
+            container.offsetHeight;
+            
+            const zoomedData = await this.analyzeImplicitTable(container);
+            
+            return zoomedData;
+            
+        } finally {
+            // Restore original styles
+            document.body.style.transform = originalTransform;
+            document.body.style.zoom = originalZoom;
+            document.body.style.width = originalWidth;
+            document.body.style.height = originalHeight;
+            
+            // Allow time for styles to restore
+            await this.sleep(200);
+        }
+    }
+
+    async performDeepTableScan(container) {
+        console.log('Performing deep table scan...');
+        
+        // Look for all possible row elements in the entire DOM near the table
+        const rowCandidates = [];
+        
+        // Common row selectors for React tables
+        const rowSelectors = [
+            '[class*="row"]',
+            '[class*="item"]', 
+            '[class*="entry"]',
+            '[class*="record"]',
+            '[role="row"]',
+            'tr',
+            'li'
+        ];
+        
+        // Search in wider context
+        const searchRoot = container.closest('[class*="table"]') || 
+                          container.closest('[class*="grid"]') || 
+                          container.closest('[class*="list"]') || 
+                          container;
+        
+        for (const selector of rowSelectors) {
+            const elements = Array.from(searchRoot.querySelectorAll(selector));
+            rowCandidates.push(...elements);
+        }
+        
+        console.log(`Found ${rowCandidates.length} potential row elements`);
+        
+        // Extract data from all potential rows
+        const allRows = [];
+        const seenRowKeys = new Set();
+        let headers = [];
+        
+        for (const rowElement of rowCandidates) {
+            if (!this.isVisibleElement(rowElement)) continue;
+            
+            const rowData = this.extractCellsFromElement(rowElement);
+            if (rowData.length > 0) {
+                const rowKey = rowData.join('|');
+                if (!seenRowKeys.has(rowKey)) {
+                    seenRowKeys.add(rowKey);
+                    allRows.push(rowData);
+                    
+                    // Use longest row as potential headers if we don't have headers
+                    if (rowData.length > headers.length && this.looksLikeHeader(rowElement)) {
+                        headers = rowData;
+                    }
+                }
+            }
+        }
+        
+        if (allRows.length > 0) {
+            // Sort rows by their position in the DOM
+            const sortedRows = allRows.sort((a, b) => {
+                // Simple heuristic: assume data rows are more similar to each other
+                return 0;
+            });
+            
+            return {
+                headers: headers.length > 0 ? headers : Array.from({ length: Math.max(...allRows.map(r => r.length)) }, (_, i) => `Column ${i + 1}`),
+                rows: sortedRows,
+                columnTypes: this.inferColumnTypes(sortedRows)
+            };
+        }
+        
+        return null;
+    }
+
+    findScrollableParent(element) {
+        let current = element;
+        let depth = 0;
+        
+        while (current && depth < 10) {
+            const style = window.getComputedStyle(current);
+            const isScrollable = style.overflow === 'auto' || style.overflow === 'scroll' ||
+                               style.overflowY === 'auto' || style.overflowY === 'scroll';
+            
+            if (isScrollable && current.scrollHeight > current.clientHeight) {
+                return current;
+            }
+            
+            current = current.parentElement;
+            depth++;
+        }
+        
+        // Check if document body/html is scrollable
+        if (document.body.scrollHeight > window.innerHeight) {
+            return document.body;
+        }
+        
+        return null;
     }
 
     async waitForDOMStability(timeout = 500) {
@@ -530,28 +967,20 @@ class CognitoTableContentScript {
 
     async analyzeExplicitTable(table) {
         const data = { headers: [], rows: [], columnTypes: [] };
+        const allRows = Array.from(table.querySelectorAll('tr'));
         
-        let headerRow = table.querySelector('thead tr');
-        if (!headerRow) {
-            const firstRow = table.querySelector('tr');
-            const hasThCells = firstRow && firstRow.querySelectorAll('th').length > 0;
-            if (hasThCells) {
-                headerRow = firstRow;
-            }
+        if (allRows.length === 0) return data;
+
+        // Detect multi-level headers by checking for rowspan/colspan in first few rows
+        const headerRowsEnd = this.detectHeaderRowsEnd(allRows);
+        const headerRows = allRows.slice(0, headerRowsEnd);
+        const dataRows = allRows.slice(headerRowsEnd);
+
+        if (headerRows.length > 0) {
+            data.headers = this.processMultiLevelHeaders(headerRows);
         }
 
-        if (headerRow) {
-            const headers = Array.from(headerRow.querySelectorAll('th, td')).map(cell => 
-                this.extractCellText(cell)
-            );
-            data.headers = headers;
-        }
-
-        const bodyRows = headerRow ? 
-            Array.from(table.querySelectorAll('tr')).slice(1) :
-            Array.from(table.querySelectorAll('tr'));
-
-        bodyRows.forEach(row => {
+        dataRows.forEach(row => {
             const cells = Array.from(row.querySelectorAll('td, th')).map(cell => 
                 this.extractCellText(cell)
             );
@@ -562,6 +991,170 @@ class CognitoTableContentScript {
 
         data.columnTypes = this.inferColumnTypes(data.rows);
         return data;
+    }
+
+    detectHeaderRowsEnd(rows) {
+        let headerRowsCount = 0;
+        
+        // Look for consecutive rows that have characteristics of headers
+        for (let i = 0; i < Math.min(rows.length, 6); i++) {
+            const row = rows[i];
+            const cells = Array.from(row.querySelectorAll('td, th'));
+            
+            if (cells.length === 0) continue;
+            
+            const hasThCells = cells.some(cell => cell.tagName.toLowerCase() === 'th');
+            const hasSpans = cells.some(cell => 
+                parseInt(cell.getAttribute('colspan') || '1') > 1 || 
+                parseInt(cell.getAttribute('rowspan') || '1') > 1
+            );
+            
+            // Check if cells contain mostly non-numeric content (header characteristic)
+            const nonNumericCells = cells.filter(cell => {
+                const text = this.extractCellText(cell).trim();
+                // Consider a cell non-numeric if it doesn't look like a pure number
+                return text && !(/^-?[\d,]+(\.\d+)?$/.test(text.replace(/[,\s]/g, '')));
+            });
+            
+            const isHeaderLike = hasThCells || hasSpans || 
+                (nonNumericCells.length > cells.length * 0.7); // 70% non-numeric
+            
+            if (isHeaderLike) {
+                headerRowsCount = i + 1;
+            } else if (headerRowsCount > 0) {
+                // We found header rows followed by a non-header row
+                break;
+            }
+        }
+        
+        // If no clear header detection, fall back to simpler logic
+        if (headerRowsCount === 0) {
+            const firstRow = rows[0];
+            const hasThCells = firstRow && firstRow.querySelectorAll('th').length > 0;
+            return hasThCells ? 1 : 0;
+        }
+        
+        return headerRowsCount;
+    }
+
+    processMultiLevelHeaders(headerRows) {
+        if (headerRows.length === 0) return [];
+        
+        // Build a grid representing the header structure
+        const grid = this.buildHeaderGrid(headerRows);
+        
+        // Generate final column headers by combining hierarchical levels
+        return this.generateFinalHeaders(grid);
+    }
+
+    buildHeaderGrid(headerRows) {
+        const grid = [];
+        let maxCols = 0;
+        
+        // First pass: determine maximum columns needed
+        headerRows.forEach(row => {
+            const cells = Array.from(row.querySelectorAll('td, th'));
+            let colCount = 0;
+            cells.forEach(cell => {
+                const colspan = parseInt(cell.getAttribute('colspan') || '1');
+                colCount += colspan;
+            });
+            maxCols = Math.max(maxCols, colCount);
+        });
+        
+        // Initialize grid
+        for (let r = 0; r < headerRows.length; r++) {
+            grid[r] = new Array(maxCols).fill(null);
+        }
+        
+        // Fill grid with cell data
+        headerRows.forEach((row, rowIndex) => {
+            const cells = Array.from(row.querySelectorAll('td, th'));
+            let colIndex = 0;
+            
+            cells.forEach(cell => {
+                // Find next available column
+                while (colIndex < maxCols && grid[rowIndex][colIndex] !== null) {
+                    colIndex++;
+                }
+                
+                if (colIndex >= maxCols) return;
+                
+                const colspan = parseInt(cell.getAttribute('colspan') || '1');
+                const rowspan = parseInt(cell.getAttribute('rowspan') || '1');
+                const text = this.extractCellText(cell).trim();
+                
+                // Fill all cells covered by this span
+                for (let r = 0; r < rowspan && rowIndex + r < grid.length; r++) {
+                    for (let c = 0; c < colspan && colIndex + c < maxCols; c++) {
+                        grid[rowIndex + r][colIndex + c] = {
+                            text: text,
+                            isSpanOrigin: r === 0 && c === 0,
+                            colspan: colspan,
+                            rowspan: rowspan,
+                            level: rowIndex
+                        };
+                    }
+                }
+                
+                colIndex += colspan;
+            });
+        });
+        
+        return grid;
+    }
+
+    generateFinalHeaders(grid) {
+        if (grid.length === 0) return [];
+        
+        const finalHeaders = [];
+        const numCols = grid[0].length;
+        
+        for (let col = 0; col < numCols; col++) {
+            const headerParts = [];
+            
+            // Collect header text from each level for this column
+            for (let row = 0; row < grid.length; row++) {
+                const cell = grid[row][col];
+                if (cell && cell.text && cell.text.trim()) {
+                    // Only add if it's not a repetition from previous level
+                    const lastPart = headerParts[headerParts.length - 1];
+                    if (!lastPart || lastPart !== cell.text) {
+                        headerParts.push(cell.text);
+                    }
+                }
+            }
+            
+            // Combine parts with delimiter, prioritizing the most specific (deepest level)
+            let finalHeader = '';
+            if (headerParts.length > 0) {
+                // Use the most specific (last) non-empty header part
+                const specificHeader = headerParts[headerParts.length - 1];
+                
+                // If we have multiple levels, combine them intelligently
+                if (headerParts.length > 1) {
+                    // For cases like "Debt" > "Debt VRR", combine as "Debt - Debt VRR"
+                    // But avoid repetition like "Debt" > "Debt" becoming "Debt - Debt"
+                    const parentParts = headerParts.slice(0, -1).filter(part => 
+                        part && !specificHeader.includes(part)
+                    );
+                    
+                    if (parentParts.length > 0) {
+                        finalHeader = parentParts.join(' - ') + ' - ' + specificHeader;
+                    } else {
+                        finalHeader = specificHeader;
+                    }
+                } else {
+                    finalHeader = specificHeader;
+                }
+            } else {
+                finalHeader = `Column ${col + 1}`;
+            }
+            
+            finalHeaders.push(finalHeader);
+        }
+        
+        return finalHeaders;
     }
 
     async analyzeImplicitTable(container) {
@@ -793,11 +1386,52 @@ class CognitoTableContentScript {
         const rect = element.getBoundingClientRect();
         const style = window.getComputedStyle(element);
         
-        return rect.width > 0 && 
-               rect.height > 0 && 
-               style.display !== 'none' && 
-               style.visibility !== 'hidden' &&
-               style.opacity !== '0';
+        // Check if element has dimensions and is not hidden
+        const hasVisibleDimensions = rect.width > 0 && rect.height > 0;
+        const isNotHidden = style.display !== 'none' && 
+                           style.visibility !== 'hidden' &&
+                           style.opacity !== '0';
+        
+        // For virtualized tables, also consider elements that might be outside viewport
+        // but still part of the table structure
+        const isVirtualizedElement = this.isPartOfVirtualizedTable(element);
+        
+        return (hasVisibleDimensions && isNotHidden) || isVirtualizedElement;
+    }
+
+    isPartOfVirtualizedTable(element) {
+        // Check if element is part of a virtualized table structure
+        // Common patterns: React Virtualized, react-window, etc.
+        const virtualizedIndicators = [
+            'react-virtualized',
+            'react-window', 
+            'virtual',
+            'infinite',
+            'viewport'
+        ];
+        
+        let current = element;
+        let depth = 0;
+        
+        while (current && depth < 10) {
+            const className = (current.className || '').toLowerCase();
+            const id = (current.id || '').toLowerCase();
+            const dataAttrs = Array.from(current.attributes || [])
+                .filter(attr => attr.name.startsWith('data-'))
+                .map(attr => attr.value.toLowerCase())
+                .join(' ');
+            
+            const searchText = `${className} ${id} ${dataAttrs}`;
+            
+            if (virtualizedIndicators.some(indicator => searchText.includes(indicator))) {
+                return true;
+            }
+            
+            current = current.parentElement;
+            depth++;
+        }
+        
+        return false;
     }
 
     getElementSelector(element) {
