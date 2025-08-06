@@ -386,6 +386,7 @@ class CognitoTableContentScript {
 
     async performScrollExtraction(container, scrollableElement) {
         const allData = { headers: [], rows: [], columnTypes: [] };
+        const allRowsWithPositions = [];
         const seenRows = new Set();
         
         // Get initial data
@@ -396,11 +397,17 @@ class CognitoTableContentScript {
             }
             
             if (initialData.rows) {
-                initialData.rows.forEach(row => {
+                // Add initial rows with their current positions
+                initialData.rows.forEach((row, index) => {
                     const rowKey = row.join('|');
                     if (!seenRows.has(rowKey)) {
                         seenRows.add(rowKey);
-                        allData.rows.push(row);
+                        allRowsWithPositions.push({
+                            data: row,
+                            scrollPosition: 0,
+                            discoveryOrder: index,
+                            domPosition: this.getRowDOMPosition(row, container)
+                        });
                     }
                 });
             }
@@ -411,7 +418,11 @@ class CognitoTableContentScript {
             document.body.scrollHeight - window.innerHeight :
             scrollableElement.scrollHeight - scrollableElement.clientHeight;
         
-        if (maxScroll <= 0) return allData;
+        if (maxScroll <= 0) {
+            allData.rows = allRowsWithPositions.map(r => r.data);
+            allData.columnTypes = this.inferColumnTypes(allData.rows);
+            return allData;
+        }
         
         // More aggressive scrolling - smaller steps, more attempts
         const scrollSteps = Math.min(25, Math.ceil(maxScroll / 200)); // Smaller scroll increments
@@ -437,23 +448,71 @@ class CognitoTableContentScript {
             const stepData = await this.analyzeImplicitTable(container);
             if (stepData && stepData.rows) {
                 let newRowsFound = 0;
-                stepData.rows.forEach(row => {
+                stepData.rows.forEach((row, index) => {
                     const rowKey = row.join('|');
                     if (!seenRows.has(rowKey)) {
                         seenRows.add(rowKey);
-                        allData.rows.push(row);
+                        allRowsWithPositions.push({
+                            data: row,
+                            scrollPosition: scrollPosition,
+                            discoveryOrder: allRowsWithPositions.length,
+                            domPosition: this.getRowDOMPosition(row, container)
+                        });
                         newRowsFound++;
                     }
                 });
                 
-                console.log(`Step ${step}: Found ${newRowsFound} new rows (total: ${allData.rows.length})`);
+                console.log(`Step ${step}: Found ${newRowsFound} new rows (total: ${allRowsWithPositions.length})`);
             }
             
             // Continue even if no new rows found - some virtualization patterns have gaps
         }
         
+        // Sort rows to preserve visual order - prioritize DOM position over scroll discovery
+        const sortedRowsWithPos = allRowsWithPositions.sort((a, b) => {
+            // Primary sort: DOM position (if available)
+            if (a.domPosition !== null && b.domPosition !== null) {
+                return a.domPosition - b.domPosition;
+            }
+            
+            // Secondary sort: scroll position where discovered
+            if (a.scrollPosition !== b.scrollPosition) {
+                return a.scrollPosition - b.scrollPosition;
+            }
+            
+            // Tertiary sort: discovery order
+            return a.discoveryOrder - b.discoveryOrder;
+        });
+        
+        allData.rows = sortedRowsWithPos.map(r => r.data);
         allData.columnTypes = this.inferColumnTypes(allData.rows);
+        
+        console.log('Scroll extraction completed with proper ordering');
         return allData;
+    }
+
+    getRowDOMPosition(rowData, container) {
+        // Try to find the DOM element that contains this row data
+        // This is a heuristic approach since we only have the data, not the original element
+        try {
+            const firstCellText = rowData[0] ? rowData[0].toString().trim().substring(0, 20) : '';
+            if (!firstCellText) return null;
+            
+            // Search for elements containing the first cell's text
+            const candidates = Array.from(container.querySelectorAll('*')).filter(el => {
+                const text = el.textContent.trim();
+                return text.includes(firstCellText) && text.length < firstCellText.length * 3;
+            });
+            
+            if (candidates.length > 0) {
+                // Return DOM position of the best matching candidate
+                return this.calculateDOMPosition(candidates[0], container);
+            }
+        } catch (error) {
+            console.warn('Error calculating row DOM position:', error);
+        }
+        
+        return null;
     }
 
     async simulateZoomExtraction(container) {
@@ -522,8 +581,8 @@ class CognitoTableContentScript {
         
         console.log(`Found ${rowCandidates.length} potential row elements`);
         
-        // Extract data from all potential rows
-        const allRows = [];
+        // Extract data from all potential rows WITH DOM position tracking
+        const rowsWithPositions = [];
         const seenRowKeys = new Set();
         let headers = [];
         
@@ -535,7 +594,16 @@ class CognitoTableContentScript {
                 const rowKey = rowData.join('|');
                 if (!seenRowKeys.has(rowKey)) {
                     seenRowKeys.add(rowKey);
-                    allRows.push(rowData);
+                    
+                    // Calculate DOM position
+                    const domPosition = this.calculateDOMPosition(rowElement, searchRoot);
+                    
+                    rowsWithPositions.push({
+                        data: rowData,
+                        element: rowElement,
+                        domPosition: domPosition,
+                        rowKey: rowKey
+                    });
                     
                     // Use longest row as potential headers if we don't have headers
                     if (rowData.length > headers.length && this.looksLikeHeader(rowElement)) {
@@ -545,21 +613,45 @@ class CognitoTableContentScript {
             }
         }
         
-        if (allRows.length > 0) {
-            // Sort rows by their position in the DOM
-            const sortedRows = allRows.sort((a, b) => {
-                // Simple heuristic: assume data rows are more similar to each other
-                return 0;
+        if (rowsWithPositions.length > 0) {
+            // Sort rows by their DOM position to preserve visual order
+            const sortedRowsWithPos = rowsWithPositions.sort((a, b) => {
+                return a.domPosition - b.domPosition;
             });
             
+            const sortedRows = sortedRowsWithPos.map(row => row.data);
+            
+            console.log('Deep scan rows sorted by DOM position:', sortedRows.length);
+            
             return {
-                headers: headers.length > 0 ? headers : Array.from({ length: Math.max(...allRows.map(r => r.length)) }, (_, i) => `Column ${i + 1}`),
+                headers: headers.length > 0 ? headers : Array.from({ length: Math.max(...sortedRows.map(r => r.length)) }, (_, i) => `Column ${i + 1}`),
                 rows: sortedRows,
                 columnTypes: this.inferColumnTypes(sortedRows)
             };
         }
         
         return null;
+    }
+
+    calculateDOMPosition(element, root = document) {
+        // Calculate a numeric position based on element's position in DOM tree
+        let position = 0;
+        let current = element;
+        let depth = 0;
+        
+        while (current && current !== root && depth < 20) {
+            const parent = current.parentElement;
+            if (parent) {
+                const siblings = Array.from(parent.children);
+                const index = siblings.indexOf(current);
+                // Weight deeper elements less to preserve overall order
+                position += index * Math.pow(0.1, depth);
+            }
+            current = parent;
+            depth++;
+        }
+        
+        return position;
     }
 
     findScrollableParent(element) {
@@ -661,12 +753,21 @@ class CognitoTableContentScript {
                     element: this.getElementSelector(candidate.element),
                     boundingRect: candidate.element.getBoundingClientRect(),
                     data: tableData,
-                    preview: this.generatePreview(tableData)
+                    preview: this.generatePreview(tableData),
+                    domPosition: this.calculateDOMPosition(candidate.element) // Add DOM position for sorting
                 });
             }
         }
 
-        return tables.sort((a, b) => b.confidence - a.confidence);
+        // Sort by DOM position first (visual order), then by confidence
+        return tables.sort((a, b) => {
+            // If both tables have DOM positions, sort by position
+            if (a.domPosition !== undefined && b.domPosition !== undefined) {
+                return a.domPosition - b.domPosition;
+            }
+            // Otherwise, sort by confidence
+            return b.confidence - a.confidence;
+        });
     }
 
     findExplicitTables() {
@@ -1164,7 +1265,15 @@ class CognitoTableContentScript {
         if (children.length === 0) return null;
 
         let headerDetected = false;
-        children.forEach((child, index) => {
+        
+        // Sort children by their DOM order to ensure proper sequence
+        const sortedChildren = children.sort((a, b) => {
+            const aPosition = this.calculateDOMPosition(a, container);
+            const bPosition = this.calculateDOMPosition(b, container);
+            return aPosition - bPosition;
+        });
+
+        sortedChildren.forEach((child, index) => {
             const cells = this.extractCellsFromElement(child);
             if (cells.length === 0) return;
 
