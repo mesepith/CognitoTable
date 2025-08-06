@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Create CognitoTable Icons</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .icon-preview { display: inline-block; margin: 10px; text-align: center; }
+        canvas { border: 1px solid #ddd; margin: 5px; }
+    </style>
+</head>
+<body>
+    <h1>CognitoTable Icons</h1>
+    <div id="icons"></div>
+    
+    <script>
+        function createIcon(size) {
+            const canvas = document.createElement('canvas');
+            canvas.width = size;
+            canvas.height = size;
+            const ctx = canvas.getContext('2d');
+            
+            // Solid background
+            ctx.fillStyle = '#667eea';
+            ctx.fillRect(0, 0, size, size);
+            
+            // Draw table grid
+            ctx.strokeStyle = 'white';
+            ctx.lineWidth = Math.max(1, size / 16);
+            ctx.setLineDash([]);
+            
+            const padding = size * 0.2;
+            const gridWidth = size - 2 * padding;
+            const gridHeight = size - 2 * padding;
+            const cellWidth = gridWidth / 3;
+            const cellHeight = gridHeight / 3;
+            
+            // Draw grid lines
+            for (let i = 0; i <= 3; i++) {
+                // Vertical lines
+                ctx.beginPath();
+                ctx.moveTo(padding + i * cellWidth, padding);
+                ctx.lineTo(padding + i * cellWidth, padding + gridHeight);
+                ctx.stroke();
+                
+                // Horizontal lines
+                ctx.beginPath();
+                ctx.moveTo(padding, padding + i * cellHeight);
+                ctx.lineTo(padding + gridWidth, padding + i * cellHeight);
+                ctx.stroke();
+            }
+            
+            // Add "C" logo in center
+            ctx.fillStyle = 'white';
+            ctx.font = `bold ${Math.floor(size * 0.3)}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('C', size / 2, size / 2);
+            
+            return canvas;
+        }
+        
+        function downloadCanvas(canvas, filename) {
+            const link = document.createElement('a');
+            link.download = filename;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        }
+        
+        const sizes = [16, 48, 128];
+        const container = document.getElementById('icons');
+        
+        sizes.forEach(size => {
+            const div = document.createElement('div');
+            div.className = 'icon-preview';
+            
+            const canvas = createIcon(size);
+            div.appendChild(canvas);
+            
+            const button = document.createElement('button');
+            button.textContent = `Download ${size}x${size}`;
+            button.onclick = () => downloadCanvas(canvas, `icon${size}.png`);
+            div.appendChild(document.createElement('br'));
+            div.appendChild(button);
+            
+            container.appendChild(div);
+        });
+    </script>
+</body>
+</html>
