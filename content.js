@@ -296,7 +296,12 @@ class CognitoTableContentScript {
         for (let i = 0; i < scrollTargets.length; i++) {
             const scrollableElement = scrollTargets[i];
             const originalScrollTop = scrollableElement.scrollTop;
-            console.log(`Trying scrollable element ${i + 1}:`, scrollableElement.tagName, scrollableElement.className);
+            // Handle window object and elements without className
+            const elementInfo = scrollableElement === window ? 'window' : 
+                               (scrollableElement.tagName || 'unknown');
+            const className = scrollableElement === window ? '' : 
+                            (scrollableElement.className || '');
+            console.log(`Trying scrollable element ${i + 1}:`, elementInfo, className);
             
             try {
                 const result = await this.performScrollExtraction(container, scrollableElement);
@@ -713,6 +718,7 @@ class CognitoTableContentScript {
 
     async scanForTables() {
         const tables = [];
+        const seenContent = new Map(); // For content-based deduplication
         let tableId = 0;
 
         // Debug: Show what elements are on the page
@@ -730,15 +736,23 @@ class CognitoTableContentScript {
         for (const table of explicitTables) {
             const tableData = await this.analyzeExplicitTable(table);
             if (tableData && tableData.rows.length > 0) {
-                tables.push({
-                    id: ++tableId,
-                    type: 'explicit',
-                    confidence: 0.95,
-                    element: this.getElementSelector(table),
-                    boundingRect: table.getBoundingClientRect(),
-                    data: tableData,
-                    preview: this.generatePreview(tableData)
-                });
+                // Create a content signature for deduplication
+                const contentSignature = this.createTableContentSignature(tableData);
+                
+                if (!seenContent.has(contentSignature)) {
+                    seenContent.set(contentSignature, true);
+                    tables.push({
+                        id: ++tableId,
+                        type: 'explicit',
+                        confidence: 0.95,
+                        element: this.getElementSelector(table),
+                        boundingRect: table.getBoundingClientRect(),
+                        data: tableData,
+                        preview: this.generatePreview(tableData)
+                    });
+                } else {
+                    console.log('Skipping duplicate explicit table');
+                }
             }
         }
 
@@ -746,16 +760,24 @@ class CognitoTableContentScript {
         for (const candidate of implicitTables) {
             const tableData = await this.analyzeImplicitTable(candidate.element);
             if (tableData && tableData.rows.length > 1) {
-                tables.push({
-                    id: ++tableId,
-                    type: 'implicit',
-                    confidence: candidate.confidence,
-                    element: this.getElementSelector(candidate.element),
-                    boundingRect: candidate.element.getBoundingClientRect(),
-                    data: tableData,
-                    preview: this.generatePreview(tableData),
-                    domPosition: this.calculateDOMPosition(candidate.element) // Add DOM position for sorting
-                });
+                // Create a content signature for deduplication
+                const contentSignature = this.createTableContentSignature(tableData);
+                
+                if (!seenContent.has(contentSignature)) {
+                    seenContent.set(contentSignature, true);
+                    tables.push({
+                        id: ++tableId,
+                        type: 'implicit',
+                        confidence: candidate.confidence,
+                        element: this.getElementSelector(candidate.element),
+                        boundingRect: candidate.element.getBoundingClientRect(),
+                        data: tableData,
+                        preview: this.generatePreview(tableData),
+                        domPosition: this.calculateDOMPosition(candidate.element) // Add DOM position for sorting
+                    });
+                } else {
+                    console.log('Skipping duplicate implicit table with signature:', contentSignature.substring(0, 50));
+                }
             }
         }
 
@@ -770,6 +792,30 @@ class CognitoTableContentScript {
         });
     }
 
+    createTableContentSignature(tableData) {
+        // Create a unique signature based on table content
+        // Use headers and first few rows to create the signature
+        const parts = [];
+        
+        // Add headers to signature
+        if (tableData.headers && tableData.headers.length > 0) {
+            parts.push('H:' + tableData.headers.join('|'));
+        }
+        
+        // Add first 3 rows to signature
+        if (tableData.rows && tableData.rows.length > 0) {
+            const rowsToCheck = tableData.rows.slice(0, 3);
+            rowsToCheck.forEach((row, index) => {
+                parts.push(`R${index}:` + row.join('|'));
+            });
+        }
+        
+        // Add row count and column count for additional uniqueness
+        parts.push(`Count:${tableData.rows.length}x${tableData.headers ? tableData.headers.length : 0}`);
+        
+        return parts.join('::');
+    }
+
     findExplicitTables() {
         const tables = document.querySelectorAll('table');
         console.log('Found', tables.length, 'total table elements');
@@ -782,6 +828,8 @@ class CognitoTableContentScript {
 
     async findImplicitTables() {
         const candidates = [];
+        const processedElements = new Set();
+        
         // Look for common React/modern web patterns
         const containers = document.querySelectorAll('div, ul, ol, section, article, main, [class*="table"], [class*="grid"], [class*="list"], [class*="row"], [role="table"], [role="grid"]');
         console.log('Checking', containers.length, 'potential table containers for implicit tables');
@@ -789,6 +837,11 @@ class CognitoTableContentScript {
         let checkedContainers = 0;
         for (const container of containers) {
             if (!this.isVisibleElement(container)) continue;
+            
+            // Skip if already processed
+            if (processedElements.has(container)) continue;
+            processedElements.add(container);
+            
             checkedContainers++;
             
             const children = Array.from(container.children);
@@ -817,7 +870,12 @@ class CognitoTableContentScript {
         }
 
         console.log('Checked', checkedContainers, 'visible containers, found', candidates.length, 'candidates');
-        const sortedCandidates = candidates.sort((a, b) => b.confidence - a.confidence).slice(0, 10);
+        
+        // Remove overlapping/nested candidates - keep only the most specific or highest confidence
+        const filteredCandidates = this.filterOverlappingTables(candidates);
+        console.log('After filtering overlapping tables:', filteredCandidates.length, 'candidates remain');
+        
+        const sortedCandidates = filteredCandidates.sort((a, b) => b.confidence - a.confidence).slice(0, 10);
         
         // If no tables found, check for iframes
         if (sortedCandidates.length === 0) {
@@ -827,6 +885,141 @@ class CognitoTableContentScript {
         }
         
         return sortedCandidates;
+    }
+
+    filterOverlappingTables(candidates) {
+        if (candidates.length <= 1) return candidates;
+        
+        const filtered = [];
+        const processedAreas = [];
+        
+        // Sort by confidence first
+        const sorted = candidates.sort((a, b) => b.confidence - a.confidence);
+        
+        for (const candidate of sorted) {
+            const element = candidate.element;
+            let isOverlapping = false;
+            
+            // Check if this element is a parent or child of any already processed element
+            for (const processed of filtered) {
+                const processedElement = processed.element;
+                
+                // Check parent-child relationship
+                if (element.contains(processedElement) || processedElement.contains(element)) {
+                    // If this is a parent of an already processed element, skip it
+                    // If this is a child with lower confidence, skip it
+                    if (element.contains(processedElement) || candidate.confidence <= processed.confidence) {
+                        isOverlapping = true;
+                        break;
+                    }
+                    // If this is a child with higher confidence, we'll keep it and remove the parent later
+                }
+                
+                // Check for significant spatial overlap (for non-parent-child relationships)
+                const rect1 = element.getBoundingClientRect();
+                const rect2 = processedElement.getBoundingClientRect();
+                
+                const overlapArea = this.calculateOverlapArea(rect1, rect2);
+                const area1 = rect1.width * rect1.height;
+                const area2 = rect2.width * rect2.height;
+                
+                // If more than 80% overlap, consider them the same table
+                if (area1 > 0 && area2 > 0) {
+                    const overlapPercentage = overlapArea / Math.min(area1, area2);
+                    if (overlapPercentage > 0.8) {
+                        isOverlapping = true;
+                        break;
+                    }
+                }
+            }
+            
+            if (!isOverlapping) {
+                // Also check if the content is essentially the same (deduplication)
+                let isDuplicate = false;
+                for (const processed of filtered) {
+                    if (this.areTableContentsSimilar(candidate, processed)) {
+                        console.log('Found duplicate table content, skipping');
+                        isDuplicate = true;
+                        break;
+                    }
+                }
+                
+                if (!isDuplicate) {
+                    filtered.push(candidate);
+                }
+            }
+        }
+        
+        return filtered;
+    }
+
+    calculateOverlapArea(rect1, rect2) {
+        const xOverlap = Math.max(0, Math.min(rect1.right, rect2.right) - Math.max(rect1.left, rect2.left));
+        const yOverlap = Math.max(0, Math.min(rect1.bottom, rect2.bottom) - Math.max(rect1.top, rect2.top));
+        return xOverlap * yOverlap;
+    }
+
+    areTableContentsSimilar(candidate1, candidate2) {
+        // Quick check: if they have very different child counts, they're probably different
+        if (Math.abs(candidate1.children.length - candidate2.children.length) > 2) {
+            return false;
+        }
+        
+        // Extract text content from first few children and compare
+        const getText = (element, maxChildren = 5) => {
+            return Array.from(element.children)
+                .slice(0, maxChildren)
+                .map(child => child.textContent.trim())
+                .filter(text => text.length > 0)
+                .join('|');
+        };
+        
+        const text1 = getText(candidate1.element);
+        const text2 = getText(candidate2.element);
+        
+        // If the text content is very similar, they're likely duplicates
+        return text1 === text2 || this.calculateTextSimilarity(text1, text2) > 0.9;
+    }
+
+    calculateTextSimilarity(text1, text2) {
+        if (text1 === text2) return 1;
+        if (!text1 || !text2) return 0;
+        
+        const longer = text1.length > text2.length ? text1 : text2;
+        const shorter = text1.length > text2.length ? text2 : text1;
+        
+        if (longer.length === 0) return 1.0;
+        
+        const editDistance = this.getLevenshteinDistance(longer, shorter);
+        return (longer.length - editDistance) / longer.length;
+    }
+
+    getLevenshteinDistance(str1, str2) {
+        const matrix = [];
+        
+        for (let i = 0; i <= str2.length; i++) {
+            matrix[i] = [i];
+        }
+        
+        for (let j = 0; j <= str1.length; j++) {
+            matrix[0][j] = j;
+        }
+        
+        for (let i = 1; i <= str2.length; i++) {
+            for (let j = 1; j <= str1.length; j++) {
+                if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+                    matrix[i][j] = matrix[i - 1][j - 1];
+                } else {
+                    matrix[i][j] = Math.min(
+                        matrix[i - 1][j - 1] + 1,
+                        matrix[i][j - 1] + 1,
+                        matrix[i - 1][j] + 1
+                    );
+                }
+            }
+        }
+        
+        return matrix[str2.length][str1.length];
     }
 
     async analyzeContainerForTablePattern(container, children) {
@@ -872,8 +1065,10 @@ class CognitoTableContentScript {
     }
 
     getStructuralSignature(element) {
-        const tagName = element.tagName.toLowerCase();
-        const childTags = Array.from(element.children).map(child => child.tagName.toLowerCase()).sort();
+        const tagName = element.tagName ? element.tagName.toLowerCase() : 'unknown';
+        const childTags = Array.from(element.children || []).map(child => 
+            child.tagName ? child.tagName.toLowerCase() : 'unknown'
+        ).sort();
         const textLength = element.textContent.trim().length;
         const hasImages = element.querySelectorAll('img').length > 0;
         const hasLinks = element.querySelectorAll('a').length > 0;
@@ -1029,7 +1224,9 @@ class CognitoTableContentScript {
             'header', 'data', 'item', 'entry', 'record'
         ];
         
-        const containerClass = (container.className || '').toLowerCase();
+        // Safely handle className - it might be undefined or not a string
+        const containerClass = typeof container.className === 'string' ? 
+            container.className.toLowerCase() : '';
         const containerId = (container.id || '').toLowerCase();
         
         tableKeywords.forEach(keyword => {
@@ -1104,7 +1301,7 @@ class CognitoTableContentScript {
             
             if (cells.length === 0) continue;
             
-            const hasThCells = cells.some(cell => cell.tagName.toLowerCase() === 'th');
+        const hasThCells = cells.some(cell => cell.tagName && cell.tagName.toLowerCase() === 'th');
             const hasSpans = cells.some(cell => 
                 parseInt(cell.getAttribute('colspan') || '1') > 1 || 
                 parseInt(cell.getAttribute('rowspan') || '1') > 1
@@ -1323,8 +1520,9 @@ class CognitoTableContentScript {
             {
                 acceptNode: (node) => {
                     const parent = node.parentElement;
-                    if (parent.tagName.toLowerCase() === 'script' || 
-                        parent.tagName.toLowerCase() === 'style') {
+                    if (parent && parent.tagName && 
+                        (parent.tagName.toLowerCase() === 'script' || 
+                         parent.tagName.toLowerCase() === 'style')) {
                         return NodeFilter.FILTER_REJECT;
                     }
                     return node.textContent.trim() ? 
@@ -1394,14 +1592,16 @@ class CognitoTableContentScript {
 
     looksLikeHeader(element) {
         const style = window.getComputedStyle(element);
-        const tagName = element.tagName.toLowerCase();
+        const tagName = element.tagName ? element.tagName.toLowerCase() : '';
         
         const fontWeight = parseInt(style.fontWeight) || 400;
         const fontSize = parseFloat(style.fontSize) || 14;
         const backgroundColor = style.backgroundColor;
         
         const isHeaderTag = /^h[1-6]$/.test(tagName);
-        const hasHeaderClass = /header|title|head/.test((element.className || '').toLowerCase());
+        // Safely handle className - it might be undefined or not a string
+        const className = typeof element.className === 'string' ? element.className : '';
+        const hasHeaderClass = /header|title|head/.test(className.toLowerCase());
         const hasHeaderRole = element.getAttribute('role') === 'columnheader';
         const isBold = fontWeight >= 600;
         const isLargerText = fontSize > 16;
@@ -1523,7 +1723,9 @@ class CognitoTableContentScript {
         let depth = 0;
         
         while (current && depth < 10) {
-            const className = (current.className || '').toLowerCase();
+            // Safely handle className - it might be undefined or not a string
+            const className = typeof current.className === 'string' ? 
+                current.className.toLowerCase() : '';
             const id = (current.id || '').toLowerCase();
             const dataAttrs = Array.from(current.attributes || [])
                 .filter(attr => attr.name.startsWith('data-'))
@@ -1546,9 +1748,23 @@ class CognitoTableContentScript {
     getElementSelector(element) {
         if (!element) return '';
         
+        // If element has an ID, use it (but escape special characters)
         if (element.id) {
-            return `#${element.id}`;
+            // Escape special characters in ID
+            const escapedId = CSS.escape ? CSS.escape(element.id) : element.id.replace(/([!"#$%&'()*+,./:;<=>?@[\]^`{|}~])/g, '\\$1');
+            return `#${escapedId}`;
         }
+        
+        // Function to escape CSS class names
+        const escapeClassName = (className) => {
+            if (!className) return '';
+            // Use CSS.escape if available, otherwise manually escape special characters
+            if (CSS.escape) {
+                return CSS.escape(className);
+            }
+            // Manual escaping for special characters in class names
+            return className.replace(/([!"#$%&'()*+,./:;<=>?@[\]^`{|}~])/g, '\\$1');
+        };
         
         const path = [];
         let current = element;
@@ -1556,33 +1772,78 @@ class CognitoTableContentScript {
         while (current && current.nodeType === Node.ELEMENT_NODE && path.length < 6) {
             let selector = current.nodeName.toLowerCase();
             
-            if (current.className) {
-                const classes = Array.from(current.classList)
-                    .filter(cls => cls && !/\s/.test(cls))
-                    .slice(0, 3);
-                if (classes.length > 0) {
-                    selector += '.' + classes.join('.');
+            // Safely handle className and classList
+            if (typeof current.className === 'string' && current.className) {
+                try {
+                    // Filter out classes with special characters that can't be used in selectors
+                    const classes = Array.from(current.classList || [])
+                        .filter(cls => {
+                            // Skip empty classes and classes with problematic characters
+                            if (!cls) return false;
+                            // Skip classes that start with brackets or contain them (like [&>div])
+                            if (cls.includes('[') || cls.includes(']')) return false;
+                            // Skip classes with spaces
+                            if (/\s/.test(cls)) return false;
+                            // Skip overly complex classes
+                            if (cls.length > 50) return false;
+                            return true;
+                        })
+                        .slice(0, 2) // Reduce to 2 classes to keep selector shorter
+                        .map(cls => escapeClassName(cls));
+                    
+                    if (classes.length > 0) {
+                        selector += '.' + classes.join('.');
+                    }
+                } catch (e) {
+                    // classList might not be available or might throw
+                    console.warn('Error processing classes:', e);
                 }
             }
             
-            const siblings = Array.from(current.parentNode?.children || [])
-                .filter(sibling => sibling.nodeName === current.nodeName);
-            
-            if (siblings.length > 1) {
-                const index = siblings.indexOf(current);
-                selector += `:nth-of-type(${index + 1})`;
+            // Only add nth-of-type if necessary and if selector isn't already unique enough
+            if (!current.id && path.length < 3) {
+                const siblings = Array.from(current.parentNode?.children || [])
+                    .filter(sibling => sibling.nodeName === current.nodeName);
+                
+                if (siblings.length > 1) {
+                    const index = siblings.indexOf(current);
+                    selector += `:nth-of-type(${index + 1})`;
+                }
             }
             
             path.unshift(selector);
             current = current.parentNode;
         }
         
-        return path.join(' > ');
+        // Return a simplified selector if it gets too complex
+        const fullSelector = path.join(' > ');
+        
+        // If selector is too long or complex, try to simplify it
+        if (fullSelector.length > 200) {
+            // Try using just the last 3 elements of the path
+            const simplifiedPath = path.slice(-3);
+            return simplifiedPath.join(' > ');
+        }
+        
+        return fullSelector;
     }
 
     highlightElement(selector) {
         try {
-            const element = document.querySelector(selector);
+            // Try to use the selector as-is first
+            let element = null;
+            try {
+                element = document.querySelector(selector);
+            } catch (e) {
+                // If selector is invalid, try to find element by simpler means
+                console.warn('Invalid selector, trying fallback:', selector);
+                // Try to extract an ID from the selector
+                const idMatch = selector.match(/#([^\s>]+)/);
+                if (idMatch) {
+                    element = document.getElementById(idMatch[1]);
+                }
+            }
+            
             if (element) {
                 element.style.outline = '3px solid #667eea';
                 element.style.backgroundColor = 'rgba(102, 126, 234, 0.1)';
@@ -1595,7 +1856,20 @@ class CognitoTableContentScript {
 
     unhighlightElement(selector) {
         try {
-            const element = document.querySelector(selector);
+            // Try to use the selector as-is first
+            let element = null;
+            try {
+                element = document.querySelector(selector);
+            } catch (e) {
+                // If selector is invalid, try to find element by simpler means
+                console.warn('Invalid selector for unhighlight, trying fallback:', selector);
+                // Try to extract an ID from the selector
+                const idMatch = selector.match(/#([^\s>]+)/);
+                if (idMatch) {
+                    element = document.getElementById(idMatch[1]);
+                }
+            }
+            
             if (element) {
                 element.style.outline = '';
                 element.style.backgroundColor = '';
@@ -1607,10 +1881,23 @@ class CognitoTableContentScript {
 
     async extractTableData(selector) {
         try {
-            const element = document.querySelector(selector);
+            // Try to use the selector as-is first
+            let element = null;
+            try {
+                element = document.querySelector(selector);
+            } catch (e) {
+                // If selector is invalid, try to find element by simpler means
+                console.warn('Invalid selector for extraction, trying fallback:', selector);
+                // Try to extract an ID from the selector
+                const idMatch = selector.match(/#([^\s>]+)/);
+                if (idMatch) {
+                    element = document.getElementById(idMatch[1]);
+                }
+            }
+            
             if (!element) return null;
 
-            if (element.tagName.toLowerCase() === 'table') {
+            if (element.tagName && element.tagName.toLowerCase() === 'table') {
                 return await this.analyzeExplicitTable(element);
             } else {
                 return await this.analyzeImplicitTable(element);
@@ -1660,10 +1947,10 @@ class CognitoTableContentScript {
         // Sample first few and show their structure
         potentialContainers.slice(0, 5).forEach((el, index) => {
             console.log(`Container ${index + 1}:`, {
-                tagName: el.tagName,
-                className: el.className,
-                childrenCount: el.children.length,
-                textContent: el.textContent.substring(0, 100),
+                tagName: el.tagName || 'unknown',
+                className: typeof el.className === 'string' ? el.className : '',
+                childrenCount: (el.children || []).length,
+                textContent: (el.textContent || '').substring(0, 100),
                 selector: this.getElementSelector(el)
             });
         });
@@ -1671,9 +1958,9 @@ class CognitoTableContentScript {
         // Look for repeating patterns
         const bodyChildren = Array.from(document.body.children);
         console.log('Body children:', bodyChildren.map(el => ({
-            tag: el.tagName,
-            class: el.className,
-            children: el.children.length
+            tag: el.tagName || 'unknown',
+            class: typeof el.className === 'string' ? el.className : '',
+            children: (el.children || []).length
         })));
     }
 
