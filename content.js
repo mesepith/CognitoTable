@@ -1,3 +1,6 @@
+/**
+ * @author : Zahir
+ */
 class CognitoTableContentScript {
     constructor() {
         console.log('CognitoTableContentScript constructor called');
