@@ -1,5 +1,6 @@
 /**
  * @author : Zahir
+ * Desc : Content script for Cognito Table Chrome Extension
  */
 class CognitoTableContentScript {
     constructor() {
