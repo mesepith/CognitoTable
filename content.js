@@ -38,26 +38,11 @@ class CognitoTableContentScript {
             switch (request.action) {
                 case 'getTables':
                     console.log('Processing getTables request...');
-                    // For dynamic content, wait a bit and scan multiple times
-                    this.scanWithRetry().then(tables => {
-                        console.log('scanWithRetry completed, found:', tables.length, 'tables');
-                        
-                        // Include iframe information if no tables found
-                        const response = { tables: tables };
-                        if (tables.length === 0 && this.detectedIframes && this.detectedIframes.length > 0) {
-                            response.iframes = Array.from(this.detectedIframes).map(iframe => ({
-                                src: iframe.src,
-                                title: iframe.title,
-                                sameOrigin: this.isSameOrigin(iframe.src)
-                            }));
-                        }
-                        
-                        sendResponse(response);
-                    }).catch(error => {
-                        console.error('Error getting tables:', error);
-                        sendResponse({ tables: [], error: error.message });
-                    });
-                    return true;
+                    // This now starts the scan but doesn't wait for a response.
+                    // The script will send incremental updates via 'tableFound' messages.
+                    this.scanWithRetry();
+                    // We don't send a response or return true, as this is a one-way trigger.
+                    break;
                 
                 case 'highlightTable':
                     this.highlightElement(request.selector);
@@ -79,7 +64,8 @@ class CognitoTableContentScript {
                     return true;
                 
                 default:
-                    sendResponse({ error: 'Unknown action: ' + request.action });
+                    // This can be left as is or removed if no other sync responses are needed.
+                    // sendResponse({ error: 'Unknown action: ' + request.action });
                     break;
             }
         });
@@ -100,7 +86,7 @@ class CognitoTableContentScript {
         this.isAnalyzing = true;
 
         try {
-            const tables = await this.scanForTables();
+            const tables = await this.scanForTables(true); // Pass a flag to indicate this is an initial scan for badge count
             this.updateBadgeCount(tables.length);
         } catch (error) {
             console.error('CognitoTable: Error during initial scan:', error);
@@ -114,7 +100,7 @@ class CognitoTableContentScript {
         this.isAnalyzing = true;
 
         try {
-            const tables = await this.scanForTables();
+            const tables = await this.scanForTables(true); // Pass a flag to indicate this is for badge count
             this.updateBadgeCount(tables.length);
         } catch (error) {
             console.error('CognitoTable: Error during incremental scan:', error);
@@ -125,34 +111,41 @@ class CognitoTableContentScript {
 
     async scanWithRetry(maxRetries = 3, delay = 1000) {
         console.log('Starting scanWithRetry...');
+        let foundAnyTables = false;
         
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             console.log(`Scan attempt ${attempt}/${maxRetries}`);
-            
-            // Wait for any pending DOM updates
             await this.waitForDOMStability();
             
-            const tables = await this.scanForTables();
-            console.log(`Attempt ${attempt} found ${tables.length} tables`);
+            // scanForTables will now send messages incrementally.
+            // It returns the count of tables found in that scan.
+            const tableCount = await this.scanForTables();
             
-            // If we found tables, check if they might be virtualized and try to get more data
-            if (tables.length > 0) {
-                const enhancedTables = await this.enhanceVirtualizedTables(tables);
-                return enhancedTables;
+            if (tableCount > 0) {
+                foundAnyTables = true;
+                break; // Exit retry loop if tables are found
             }
             
-            // If no tables found and this isn't the last attempt, wait and try again
             if (attempt < maxRetries) {
                 console.log(`No tables found, waiting ${delay}ms before retry...`);
                 await this.sleep(delay);
-                
-                // Increase delay for next attempt (exponential backoff)
                 delay = Math.min(delay * 1.5, 3000);
             }
         }
         
-        console.log('All scan attempts completed, no tables found');
-        return [];
+        console.log('All scan attempts completed.');
+        
+        // After all attempts, send the final completion message with iframe info.
+        const iframes = Array.from(document.querySelectorAll('iframe')).map(iframe => ({
+            src: iframe.src,
+            title: iframe.title,
+            sameOrigin: this.isSameOrigin(iframe.src)
+        }));
+
+        chrome.runtime.sendMessage({ 
+            action: 'scanComplete',
+            iframes: iframes
+        });
     }
 
     async enhanceVirtualizedTables(tables) {
@@ -720,80 +713,92 @@ class CognitoTableContentScript {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    async scanForTables() {
-        const tables = [];
-        const seenContent = new Map(); // For content-based deduplication
+    async scanForTables(forBadgeUpdateOnly = false) {
+        // If the purpose is just to update the badge, we can do a quicker, non-streaming scan.
+        if (forBadgeUpdateOnly) {
+            const tables = [];
+            const explicitTables = this.findExplicitTables();
+            tables.push(...explicitTables);
+            const implicitTables = await this.findImplicitTables();
+            tables.push(...implicitTables.map(c => c.element));
+            return tables;
+        }
+
+        const seenContent = new Map();
         let tableId = 0;
 
-        // Debug: Show what elements are on the page
-        console.log('Page body children count:', document.body.children.length);
-        console.log('Total divs on page:', document.querySelectorAll('div').length);
-        console.log('Elements with "table" in class:', document.querySelectorAll('[class*="table"]').length);
-        console.log('Elements with "grid" in class:', document.querySelectorAll('[class*="grid"]').length);
-        console.log('Elements with "row" in class:', document.querySelectorAll('[class*="row"]').length);
-        
-        // Debug: Sample some elements to understand the structure
-        this.debugPageStructure();
-        this.checkForIframes();
-
+        // --- EXPLICIT TABLES ---
         const explicitTables = this.findExplicitTables();
-        for (const table of explicitTables) {
-            const tableData = await this.analyzeExplicitTable(table);
-            if (tableData && tableData.rows.length > 0) {
-                // Create a content signature for deduplication
-                const contentSignature = this.createTableContentSignature(tableData);
-                
-                if (!seenContent.has(contentSignature)) {
-                    seenContent.set(contentSignature, true);
-                    tables.push({
-                        id: ++tableId,
-                        type: 'explicit',
-                        confidence: 0.95,
-                        element: this.getElementSelector(table),
-                        boundingRect: table.getBoundingClientRect(),
-                        data: tableData,
-                        preview: this.generatePreview(tableData)
-                    });
-                } else {
-                    console.log('Skipping duplicate explicit table');
+        for (const tableElement of explicitTables) {
+            let tableData = await this.analyzeExplicitTable(tableElement);
+            if (!tableData || tableData.rows.length === 0) continue;
+
+            if (this.detectVirtualizedTable(tableElement)) {
+                const enhancedData = await this.extractVirtualizedTableData(tableElement);
+                if (enhancedData && enhancedData.rows.length > tableData.rows.length) {
+                    tableData = enhancedData;
                 }
             }
+            
+            const contentSignature = this.createTableContentSignature(tableData);
+            if (seenContent.has(contentSignature)) continue;
+            
+            seenContent.set(contentSignature, true);
+            tableId++;
+            chrome.runtime.sendMessage({
+                action: 'tableFound',
+                table: {
+                    id: tableId,
+                    type: 'explicit',
+                    confidence: 0.95,
+                    element: this.getElementSelector(tableElement),
+                    boundingRect: tableElement.getBoundingClientRect(),
+                    data: tableData,
+                    preview: this.generatePreview(tableData)
+                }
+            });
         }
 
+        // --- IMPLICIT TABLES ---
         const implicitTables = await this.findImplicitTables();
-        for (const candidate of implicitTables) {
-            const tableData = await this.analyzeImplicitTable(candidate.element);
-            if (tableData && tableData.rows.length > 1) {
-                // Create a content signature for deduplication
-                const contentSignature = this.createTableContentSignature(tableData);
-                
-                if (!seenContent.has(contentSignature)) {
-                    seenContent.set(contentSignature, true);
-                    tables.push({
-                        id: ++tableId,
-                        type: 'implicit',
-                        confidence: candidate.confidence,
-                        element: this.getElementSelector(candidate.element),
-                        boundingRect: candidate.element.getBoundingClientRect(),
-                        data: tableData,
-                        preview: this.generatePreview(tableData),
-                        domPosition: this.calculateDOMPosition(candidate.element) // Add DOM position for sorting
-                    });
-                } else {
-                    console.log('Skipping duplicate implicit table with signature:', contentSignature.substring(0, 50));
+        const sortedImplicit = implicitTables.sort((a, b) => {
+            const posA = this.calculateDOMPosition(a.element);
+            const posB = this.calculateDOMPosition(b.element);
+            return posA - posB;
+        });
+
+        for (const candidate of sortedImplicit) {
+            let tableData = await this.analyzeImplicitTable(candidate.element);
+            if (!tableData || tableData.rows.length <= 1) continue;
+
+            if (this.detectVirtualizedTable(candidate.element)) {
+                const enhancedData = await this.extractVirtualizedTableData(candidate.element);
+                if (enhancedData && enhancedData.rows.length > tableData.rows.length) {
+                    tableData = enhancedData;
                 }
             }
+
+            const contentSignature = this.createTableContentSignature(tableData);
+            if (seenContent.has(contentSignature)) continue;
+
+            seenContent.set(contentSignature, true);
+            tableId++;
+            chrome.runtime.sendMessage({
+                action: 'tableFound',
+                table: {
+                    id: tableId,
+                    type: 'implicit',
+                    confidence: candidate.confidence,
+                    element: this.getElementSelector(candidate.element),
+                    boundingRect: candidate.element.getBoundingClientRect(),
+                    data: tableData,
+                    preview: this.generatePreview(tableData),
+                    domPosition: this.calculateDOMPosition(candidate.element)
+                }
+            });
         }
 
-        // Sort by DOM position first (visual order), then by confidence
-        return tables.sort((a, b) => {
-            // If both tables have DOM positions, sort by position
-            if (a.domPosition !== undefined && b.domPosition !== undefined) {
-                return a.domPosition - b.domPosition;
-            }
-            // Otherwise, sort by confidence
-            return b.confidence - a.confidence;
-        });
+        return tableId; // Return the count of tables found and sent
     }
 
     createTableContentSignature(tableData) {
