@@ -307,13 +307,15 @@ class CognitoTablePopup {
     }
 
     escapeCSV(field) {
-        if (typeof field !== 'string') {
-            field = String(field);
-        }
-        if (field.includes(',') || field.includes('"') || field.includes('\n')) {
-            return `"${field.replace(/"/g, '""')}"`;
-        }
-        return field;
+        // 1. Ensure the field is a string. Handle null/undefined by converting to an empty string.
+        const stringField = String(field == null ? '' : field);
+    
+        // 2. Escape any double quotes inside the field by replacing them with two double quotes.
+        const escapedField = stringField.replace(/"/g, '""');
+    
+        // 3. Enclose the entire result in double quotes to ensure it's treated as a single field,
+        //    which protects spaces, commas, and newlines within the content.
+        return `"${escapedField}"`;
     }
 
     convertToJSON(data) {
