@@ -9,11 +9,11 @@ class CognitoTablePopup {
     async init() {
         this.setupEventListeners();
         this.setupMessageListener();
-        this.scanCurrentPage();
+        this.loadInitialState();
     }
 
     setupEventListeners() {
-        document.getElementById('deepScan').addEventListener('click', () => this.performDeepScan());
+        document.getElementById('rescanPage').addEventListener('click', () => this.rescanPage());
         document.getElementById('manualSelect').addEventListener('click', () => this.activateManualSelection());
         document.getElementById('multiPage').addEventListener('click', () => this.startMultiPageExtraction());
         document.getElementById('backBtn').addEventListener('click', () => this.showMainView());
@@ -23,28 +23,62 @@ class CognitoTablePopup {
 
     setupMessageListener() {
         chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-            // Ensure the message is from the active tab content script
-            chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-                if (sender.tab && sender.tab.id === tab.id) {
-                    switch (request.action) {
-                        case 'tableFound':
-                            this.handleTableFound(request.table);
-                            break;
-                        case 'scanComplete':
-                            this.handleScanComplete(request);
-                            break;
-                    }
-                }
-            });
+            // No need to check sender, popup only receives messages intended for it
+            switch (request.action) {
+                case 'tableFound':
+                    this.handleTableFound(request.table);
+                    break;
+                case 'scanComplete':
+                    this.handleScanComplete(request);
+                    break;
+            }
         });
     }
 
+    async loadInitialState() {
+        try {
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            
+            if (this.isRestrictedUrl(tab.url)) {
+                this.showError('Cannot scan this page (restricted URL)');
+                return;
+            }
+
+            // Ask the background script for cached data for the current tab
+            const cachedTables = await chrome.runtime.sendMessage({ 
+                action: 'getCachedTableData',
+                tabId: tab.id 
+            });
+
+            if (cachedTables && Array.isArray(cachedTables)) {
+                // If we have cached data, display it immediately
+                if (cachedTables.length > 0) {
+                    cachedTables.forEach(table => this.handleTableFound(table));
+                } else {
+                    // Cache exists but is empty, so we know a scan found nothing
+                    this.handleScanComplete({ iframes: [] });
+                }
+            } else {
+                // If no valid cache, start a new scan
+                this.scanCurrentPage();
+            }
+        } catch (error) {
+            console.error('Error loading initial state:', error);
+            this.showError('Could not connect to the page. Please refresh and try again.');
+        }
+    }
+
+
     handleTableFound(table) {
-        // If this is the first table found, switch from "Scanning" to the content view
+        // Prevent adding duplicates if a table is found live and also loaded from cache
+        if (this.detectedTables.some(t => t.id === table.id)) {
+            return;
+        }
+
         if (this.detectedTables.length === 0) {
             document.getElementById('status').style.display = 'none';
             document.getElementById('content').style.display = 'block';
-            document.getElementById('tableList').innerHTML = ''; // Clear status messages
+            document.getElementById('tableList').innerHTML = '';
         }
 
         this.detectedTables.push(table);
@@ -55,7 +89,6 @@ class CognitoTablePopup {
     handleScanComplete(response) {
         this.scanInProgress = false;
         
-        // If the scan is finished and we still have no tables, show the 'no tables' message.
         if (this.detectedTables.length === 0) {
             this.showNoTablesMessage(response.iframes || []);
         }
@@ -63,20 +96,14 @@ class CognitoTablePopup {
 
     async scanCurrentPage() {
         try {
+            if (this.scanInProgress) return;
             this.scanInProgress = true;
-            this.detectedTables = []; // Reset on new scan
-            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
             
-            if (this.isRestrictedUrl(tab.url)) {
-                this.showError('Cannot scan this page (restricted URL)');
-                this.scanInProgress = false;
-                return;
-            }
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
             
             this.showStatus('Scanning page for tables...');
             
-            // Send a message to the content script to start scanning.
-            // This is now a "fire and forget" message.
+            // This message now expects a response with the final table list
             chrome.tabs.sendMessage(tab.id, { action: 'getTables' }).catch(error => {
                  console.error('Error initiating scan:', error);
                  this.showError('Could not start scan. Please refresh the page and try again.');
@@ -88,6 +115,14 @@ class CognitoTablePopup {
             this.showError('Failed to scan page: ' + error.message);
             this.scanInProgress = false;
         }
+    }
+    
+    async rescanPage() {
+        // Reset UI and internal state for a new scan
+        this.detectedTables = [];
+        document.getElementById('tableList').innerHTML = '';
+        document.getElementById('tableCount').textContent = '0';
+        this.scanCurrentPage(); // Re-trigger the scan process
     }
 
     isRestrictedUrl(url) {
@@ -101,37 +136,36 @@ class CognitoTablePopup {
         const contentEl = document.getElementById('content');
         const tableList = document.getElementById('tableList');
 
-        if (statusEl) statusEl.style.display = 'none';
-        if (contentEl) contentEl.style.display = 'block';
-        if (!tableList) return;
+        statusEl.style.display = 'none';
+        contentEl.style.display = 'block';
 
         let noTablesHTML = `
             <div class="no-tables">
                 <h4>No tables detected</h4>
-                <p>Try using "Deep Scan" or "Manual Selection" to find hidden tabular data.</p>
+                <p>Try using "Rescan Page" or "Manual Selection" to find hidden tabular data.</p>
         `;
         
         if (iframes.length > 0) {
             noTablesHTML += `
-                <div style="margin-top: 15px; padding: 10px; background: #f0f8ff; border-radius: 5px; border-left: 4px solid #667eea; text-align: left;">
-                    <h5 style="margin: 0 0 8px 0; color: #333;">🔍 Tables might be in embedded content:</h5>
+                <div class="iframe-notice">
+                    <h5 class="iframe-title">🔍 Tables might be in embedded content:</h5>
             `;
             iframes.forEach((iframe, index) => {
                 const domain = iframe.src ? new URL(iframe.src).hostname : 'unknown domain';
                 noTablesHTML += `
-                    <div style="margin: 5px 0; font-size: 12px;">
-                        <strong>Iframe ${index + 1}:</strong><br>
-                        <a href="${iframe.src}" target="_blank" style="color: #667eea; text-decoration: none;" title="${iframe.src}">
+                    <div class="iframe-item">
+                        <strong>Iframe ${index + 1}:</strong>
+                        <a href="${iframe.src}" target="_blank" title="${iframe.src}">
                             ${domain}
                         </a>
-                        <span style="color: ${iframe.sameOrigin ? 'green' : 'orange'}; font-size: 11px;">
-                            ${iframe.sameOrigin ? '(Same domain)' : '(Different domain - limited access)'}
+                        <span class="iframe-origin ${iframe.sameOrigin ? 'same' : 'different'}">
+                            ${iframe.sameOrigin ? '(Readable)' : '(Cross-domain)'}
                         </span>
                     </div>
                 `;
             });
             noTablesHTML += `
-                    <p style="margin: 10px 0 0 0; font-size: 11px; color: #666;">
+                    <p class="iframe-tip">
                         💡 Tip: Try opening the iframe content in a new tab to extract tables.
                     </p>
                 </div>
@@ -144,7 +178,6 @@ class CognitoTablePopup {
     
     addTableToView(table) {
         const tableList = document.getElementById('tableList');
-        if (!tableList) return;
         const item = this.createTableItem(table);
         tableList.appendChild(item);
     }
@@ -162,7 +195,7 @@ class CognitoTablePopup {
                 <span class="table-title">${table.type === 'explicit' ? 'HTML Table' : 'Implicit Table'} #${table.id}</span>
                 <span class="confidence-score ${confidenceClass}">${Math.round(table.confidence * 100)}%</span>
             </div>
-            <div class="table-preview-text">${table.preview}</div>
+            <pre class="table-preview-text">${table.preview}</pre>
         `;
 
         item.addEventListener('click', () => this.viewTable(table));
@@ -274,6 +307,9 @@ class CognitoTablePopup {
     }
 
     escapeCSV(field) {
+        if (typeof field !== 'string') {
+            field = String(field);
+        }
         if (field.includes(',') || field.includes('"') || field.includes('\n')) {
             return `"${field.replace(/"/g, '""')}"`;
         }
@@ -296,7 +332,7 @@ class CognitoTablePopup {
     }
 
     downloadFile(content, filename) {
-        const blob = new Blob([content], { type: 'text/plain' });
+        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -305,13 +341,6 @@ class CognitoTablePopup {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-    }
-
-    async performDeepScan() {
-        // Reset UI for a new scan
-        document.getElementById('tableList').innerHTML = '';
-        document.getElementById('tableCount').textContent = '0';
-        this.scanCurrentPage(); // Re-trigger the scan process
     }
 
     activateManualSelection() {
@@ -326,35 +355,27 @@ class CognitoTablePopup {
         const statusEl = document.getElementById('status');
         const contentEl = document.getElementById('content');
         
-        if (statusEl) {
-            statusEl.style.display = 'block';
-            statusEl.innerHTML = `
-                <div class="spinner"></div>
-                <span>${message}</span>
-            `;
-        }
+        statusEl.style.display = 'block';
+        statusEl.innerHTML = `
+            <div class="spinner"></div>
+            <span>${message}</span>
+        `;
         
-        if (contentEl) {
-            contentEl.style.display = 'none';
-        }
+        contentEl.style.display = 'none';
     }
 
     showError(message) {
         const statusEl = document.getElementById('status');
         const contentEl = document.getElementById('content');
         
-        if (statusEl) {
-            statusEl.style.display = 'block';
-            statusEl.innerHTML = `
-                <div style="color: #dc3545; padding: 20px;">
-                    <strong>Error:</strong> ${message}
-                </div>
-            `;
-        }
+        statusEl.style.display = 'block';
+        statusEl.innerHTML = `
+            <div class="error-message">
+                <strong>Error:</strong> ${message}
+            </div>
+        `;
         
-        if (contentEl) {
-            contentEl.style.display = 'none';
-        }
+        contentEl.style.display = 'none';
     }
 }
 

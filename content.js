@@ -22,7 +22,7 @@ class CognitoTableContentScript {
         console.log('CognitoTableContentScript initializing...');
         this.setupMutationObserver();
         this.setupMessageListener();
-        this.performInitialScan();
+        // The initial scan is now triggered by the background script for the badge count
         console.log('CognitoTableContentScript initialization complete');
     }
 
@@ -35,8 +35,10 @@ class CognitoTableContentScript {
         chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             switch (request.action) {
                 case 'getTables':
-                    this.scanWithRetry();
-                    break;
+                    this.scanWithRetry()
+                        .then(tables => sendResponse({ tables: tables }))
+                        .catch(error => sendResponse({ error: error.message }));
+                    return true; // Indicates an async response
                 case 'highlightTable':
                     this.domUtils.highlightElement(request.selector);
                     sendResponse({ success: true });
@@ -60,6 +62,7 @@ class CognitoTableContentScript {
     }
 
     async performInitialScan() {
+        // This is kept for potential future use or manual triggering.
         if (this.isAnalyzing) return;
         this.isAnalyzing = true;
         try {
@@ -77,6 +80,8 @@ class CognitoTableContentScript {
         this.isAnalyzing = true;
         try {
             const tables = await this.scanForBadgeUpdate();
+            // Clear the session cache as the page has changed
+            chrome.runtime.sendMessage({ action: 'clearCache' }).catch(() => {});
             this.updateBadgeCount(tables.length);
         } catch (error) {
             console.error('CognitoTable: Error during incremental scan:', error);
@@ -92,24 +97,39 @@ class CognitoTableContentScript {
     }
 
     async scanWithRetry(maxRetries = 3, delay = 1000) {
-        let tableCount = 0;
+        let allFoundTables = [];
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            tableCount = await this.scanAndSendTables();
-            if (tableCount > 0) break;
+            allFoundTables = await this.scanAndProcessTables();
+            if (allFoundTables.length > 0) break;
             if (attempt < maxRetries) await Utils.sleep(delay);
         }
         
+        // Cache the final results in the background script
+        chrome.runtime.sendMessage({ action: 'cacheTableData', tables: allFoundTables });
+
         // Final completion message
         const iframes = Array.from(document.querySelectorAll('iframe')).map(iframe => ({
             src: iframe.src,
-            title: iframe.title
+            title: iframe.title,
+            sameOrigin: this.isSameOrigin(iframe.src)
         }));
         chrome.runtime.sendMessage({ action: 'scanComplete', iframes });
+        
+        return allFoundTables;
     }
 
-    async scanAndSendTables() {
+    isSameOrigin(url) {
+        try {
+            return new URL(url).origin === window.location.origin;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    async scanAndProcessTables() {
         const seenContent = new Map();
         let tableId = 0;
+        const allFoundTables = [];
 
         // --- EXPLICIT TABLES ---
         const explicitTables = this.tableScanner.findExplicitTables();
@@ -129,17 +149,17 @@ class CognitoTableContentScript {
             seenContent.set(signature, true);
             tableId++;
 
-            chrome.runtime.sendMessage({
-                action: 'tableFound',
-                table: {
-                    id: tableId,
-                    type: 'explicit',
-                    confidence: 0.95,
-                    element: this.domUtils.getElementSelector(tableElement),
-                    data: tableData,
-                    preview: Utils.generatePreview(tableData)
-                }
-            });
+            const tableObject = {
+                id: tableId,
+                type: 'explicit',
+                confidence: 0.95,
+                element: this.domUtils.getElementSelector(tableElement),
+                data: tableData,
+                preview: Utils.generatePreview(tableData)
+            };
+            
+            chrome.runtime.sendMessage({ action: 'tableFound', table: tableObject });
+            allFoundTables.push(tableObject);
         }
 
         // --- IMPLICIT TABLES ---
@@ -160,20 +180,21 @@ class CognitoTableContentScript {
             seenContent.set(signature, true);
             tableId++;
 
-            chrome.runtime.sendMessage({
-                action: 'tableFound',
-                table: {
-                    id: tableId,
-                    type: 'implicit',
-                    confidence: candidate.confidence,
-                    element: this.domUtils.getElementSelector(candidate.element),
-                    data: tableData,
-                    preview: Utils.generatePreview(tableData)
-                }
-            });
-        }
+            const tableObject = {
+                id: tableId,
+                type: 'implicit',
+                confidence: candidate.confidence,
+                element: this.domUtils.getElementSelector(candidate.element),
+                data: tableData,
+                preview: Utils.generatePreview(tableData)
+            };
 
-        return tableId;
+            chrome.runtime.sendMessage({ action: 'tableFound', table: tableObject });
+            allFoundTables.push(tableObject);
+        }
+        
+        this.updateBadgeCount(allFoundTables.length);
+        return allFoundTables;
     }
 
     async extractTableData(selector) {
@@ -199,18 +220,6 @@ class CognitoTableContentScript {
 
 
 // --- Global Initialization ---
-let cognitoTable = null;
-
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-        cognitoTable = new CognitoTableContentScript();
-    });
-} else {
-    cognitoTable = new CognitoTableContentScript();
+if (typeof window.cognitoTable === 'undefined') {
+    window.cognitoTable = new CognitoTableContentScript();
 }
-
-window.addEventListener('beforeunload', () => {
-    if (cognitoTable) {
-        cognitoTable.destroy();
-    }
-});
