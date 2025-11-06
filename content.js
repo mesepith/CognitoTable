@@ -126,10 +126,19 @@ class CognitoTableContentScript {
         }
     }
 
+    /**
+     * Prefer explicit table extraction unless the virtualized/implicit pass yields
+     * *more unique* rows (after header-normalization).
+     */
     async scanAndProcessTables() {
         const seenContent = new Map();
         let tableId = 0;
         const allFoundTables = [];
+
+        const uniqueCount = (rows) => {
+            const s = new Set(rows.map(r => (r || []).join('|')));
+            return s.size;
+        };
 
         // --- EXPLICIT TABLES ---
         const explicitTables = this.tableScanner.findExplicitTables();
@@ -137,10 +146,15 @@ class CognitoTableContentScript {
             let tableData = await this.tableAnalyzer.analyzeExplicitTable(tableElement);
             if (!tableData || tableData.rows.length === 0) continue;
 
+            // Consider the "virtualized" enhancement only if it provides *more unique rows*
             if (this.virtualizedHandler.detectVirtualizedTable(tableElement)) {
                 const enhancedData = await this.virtualizedHandler.extractVirtualizedTableData(tableElement);
-                if (enhancedData && enhancedData.rows.length > tableData.rows.length) {
-                    tableData = enhancedData;
+                if (enhancedData) {
+                    const baseUnique = uniqueCount(tableData.rows);
+                    const enhUnique  = uniqueCount(enhancedData.rows);
+                    if (enhUnique > baseUnique) {
+                        tableData = enhancedData;
+                    }
                 }
             }
             
@@ -170,8 +184,12 @@ class CognitoTableContentScript {
 
             if (this.virtualizedHandler.detectVirtualizedTable(candidate.element)) {
                 const enhancedData = await this.virtualizedHandler.extractVirtualizedTableData(candidate.element);
-                if (enhancedData && enhancedData.rows.length > tableData.rows.length) {
-                    tableData = enhancedData;
+                if (enhancedData) {
+                    const baseUnique = uniqueCount(tableData.rows);
+                    const enhUnique  = uniqueCount(enhancedData.rows);
+                    if (enhUnique > baseUnique) {
+                        tableData = enhancedData;
+                    }
                 }
             }
 

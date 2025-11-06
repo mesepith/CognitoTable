@@ -8,32 +8,50 @@ class VirtualizedTableHandler {
         this.domUtils = domUtils;
     }
 
+    /**
+     * Make detection stricter:
+     * - Plain <table> should not be considered virtualized unless we see *strong* cues.
+     * - In general, require multiple independent indicators to reduce false positives.
+     */
     detectVirtualizedTable(container) {
-        const indicators = [
-            () => !!container.querySelector('[class*="react"], [data-react], [class*="virtual"], [class*="infinite"]'),
-            () => {
+        const isPlainTable = (container.tagName || '').toLowerCase() === 'table';
+
+        const checks = {
+            // Strong cues of framework/virtualization
+            reactOrVirtualClass: () => !!container.querySelector('[class*="react"], [data-react], [class*="virtual"], [class*="infinite"]'),
+            scrollableParentWithSparseDom: () => {
                 const scrollableParent = this.findScrollableParent(container);
                 return scrollableParent && container.querySelectorAll('*').length > 20 && container.children.length < 50;
             },
-            () => {
-                const rowElements = Array.from(container.querySelectorAll('[class*="row"], [class*="item"], tr, li'));
-                if (rowElements.length > 3) {
-                    const estimatedRowHeight = container.offsetHeight / rowElements.length;
-                    const estimatedMaxVisibleRows = Math.ceil(window.innerHeight / estimatedRowHeight);
-                    return rowElements.length <= estimatedMaxVisibleRows * 3;
-                }
-                return false;
-            },
-            () => Array.from(container.querySelectorAll('*')).some(el => {
+            transformTranslateUsage: () => Array.from(container.querySelectorAll('*')).some(el => {
                 const style = window.getComputedStyle(el);
-                return style.transform && style.transform !== 'none' && (style.transform.includes('translateY') || style.transform.includes('translate3d'));
+                return style.transform && style.transform !== 'none' &&
+                       (style.transform.includes('translateY') || style.transform.includes('translate3d'));
             }),
-            () => container.querySelectorAll('[class*="lazy"], [class*="load"], [class*="page"], [class*="more"]').length > 0,
-            () => ['react-table', 'react-grid', 'ag-grid', 'data-table'].some(className => container.querySelector(`[class*="${className}"]`)),
-            () => container.querySelectorAll('tr, [class*="row"], [class*="item"], li').length >= 5
-        ];
+            lazyOrLoadMarkers: () => container.querySelectorAll('[class*="lazy"], [class*="load"], [class*="page"], [class*="more"]').length > 0,
+            knownGridLibs: () => ['react-table', 'react-grid', 'ag-grid', 'data-table'].some(cls => container.querySelector(`[class*="${cls}"]`)),
 
-        return indicators.some(check => check());
+            // Weak/ambiguous cue — previously caused false positives
+            manyRowsVisible: () => container.querySelectorAll('tr, [class*="row"], [class*="item"], li').length >= 5
+        };
+
+        const strongSignals = [
+            checks.reactOrVirtualClass,
+            checks.scrollableParentWithSparseDom,
+            checks.transformTranslateUsage,
+            checks.lazyOrLoadMarkers,
+            checks.knownGridLibs
+        ].map(fn => fn()).filter(Boolean).length;
+
+        const weakSignals = checks.manyRowsVisible() ? 1 : 0;
+
+        if (isPlainTable) {
+            // For a real <table>, require at least ONE strong signal — ignore the weak one entirely.
+            return strongSignals >= 1;
+        }
+
+        // For non-table containers, require at least 2 combined signals (e.g., one strong + one weak, or two strong)
+        return (strongSignals + weakSignals) >= 2;
     }
 
     async extractVirtualizedTableData(container) {
@@ -44,8 +62,9 @@ class VirtualizedTableHandler {
             const originalScrollTop = scrollableElement.scrollTop;
             try {
                 const result = await this.performScrollExtraction(container, scrollableElement);
-                if (result && (!bestResult || result.rows.length > bestResult.rows.length)) {
-                    bestResult = result;
+                const cleaned = this._normalizeData(result);
+                if (cleaned && (!bestResult || cleaned.rows.length > bestResult.rows.length)) {
+                    bestResult = cleaned;
                 }
             } catch (error) {
                 console.warn(`Error with scrollable element:`, error);
@@ -56,18 +75,23 @@ class VirtualizedTableHandler {
 
         if (!bestResult || bestResult.rows.length < 15) {
             const zoomResult = await this.simulateZoomExtraction(container);
-            if (zoomResult && (!bestResult || zoomResult.rows.length > bestResult.rows.length)) {
-                bestResult = zoomResult;
+            const zoomClean = this._normalizeData(zoomResult);
+            if (zoomClean && (!bestResult || zoomClean.rows.length > bestResult.rows.length)) {
+                bestResult = zoomClean;
             }
+
             const deepScanResult = await this.performDeepTableScan(container);
-            if (deepScanResult && (!bestResult || deepScanResult.rows.length > bestResult.rows.length)) {
-                bestResult = deepScanResult;
+            const deepClean = this._normalizeData(deepScanResult);
+            if (deepClean && (!bestResult || deepClean.rows.length > bestResult.rows.length)) {
+                bestResult = deepClean;
             }
         }
 
-        return bestResult || await this.tableAnalyzer.analyzeImplicitTable(container);
+        // Fallback: if nothing solid, return the implicit analysis (also normalized)
+        const fallback = bestResult || await this.tableAnalyzer.analyzeImplicitTable(container);
+        return this._normalizeData(fallback);
     }
-    
+
     findScrollableParent(element) {
         let current = element;
         let depth = 0;
@@ -109,7 +133,7 @@ class VirtualizedTableHandler {
         for (let step = 0; step <= 10; step++) {
             const maxScroll = getMaxScroll();
             if (maxScroll <= 0) break;
-            
+
             const scrollPosition = (maxScroll / 10) * step;
             isWindow ? window.scrollTo(0, scrollPosition) : (scrollableElement.scrollTop = scrollPosition);
             await Utils.sleep(300);
@@ -126,12 +150,12 @@ class VirtualizedTableHandler {
                 });
             }
         }
-        
+
         allRowsWithPositions.sort((a, b) => a.scroll !== b.scroll ? a.scroll - b.scroll : a.order - b.order);
         const rows = allRowsWithPositions.map(r => r.data);
         return { headers, rows, columnTypes: this.tableAnalyzer.inferColumnTypes(rows) };
     }
-    
+
     async simulateZoomExtraction(container) {
         const originalStyles = { transform: document.body.style.transform, origin: document.body.style.transformOrigin, width: document.body.style.width, height: document.body.style.height };
         try {
@@ -154,19 +178,21 @@ class VirtualizedTableHandler {
         const rowSelectors = ['[class*="row"]', '[class*="item"]', '[role="row"]', 'tr', 'li'];
         const searchRoot = container.closest('[class*="table"], [class*="grid"], [class*="list"]') || container;
         const rowCandidates = rowSelectors.flatMap(selector => Array.from(searchRoot.querySelectorAll(selector)));
-        
+
         const rowsWithPositions = [];
         const seenRowKeys = new Set();
         let headers = [];
 
         for (const rowElement of rowCandidates) {
             if (!this.domUtils.isVisibleElement(rowElement)) continue;
-            
+
             const rowData = this.tableAnalyzer.extractCellsFromElement(rowElement);
             const rowKey = rowData.join('|');
             if (rowData.length > 0 && !seenRowKeys.has(rowKey)) {
                 seenRowKeys.add(rowKey);
                 rowsWithPositions.push({ data: rowData, domPosition: this.domUtils.calculateDOMPosition(rowElement, searchRoot) });
+
+                // Heuristic header pickup (may grab <tr> with THs) — we will normalize later
                 if (rowData.length > headers.length && this.tableAnalyzer.looksLikeHeader(rowElement)) {
                     headers = rowData;
                 }
@@ -182,5 +208,40 @@ class VirtualizedTableHandler {
             };
         }
         return null;
+    }
+
+    /**
+     * Normalize results to avoid header duplication:
+     * - If the first (or any) row equals the headers, drop it from `rows`.
+     * - Also de-duplicate identical rows to keep comparisons stable.
+     */
+    _normalizeData(data) {
+        if (!data || !Array.isArray(data.rows)) return data;
+
+        const normalize = (arr) => (arr || []).map(v => (v == null ? '' : String(v)).trim());
+        const headersNorm = normalize(data.headers);
+
+        let rows = data.rows.map(r => normalize(r));
+
+        if (headersNorm.length > 0 && rows.length > 0) {
+            rows = rows.filter(row =>
+                !(row.length === headersNorm.length && row.every((v, i) => v === headersNorm[i]))
+            );
+        }
+
+        // Deduplicate row content
+        const seen = new Set();
+        rows = rows.filter(r => {
+            const key = r.join('|');
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+
+        return {
+            headers: data.headers || [],
+            rows,
+            columnTypes: this.tableAnalyzer.inferColumnTypes(rows)
+        };
     }
 }
