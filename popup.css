@@ -38,6 +38,72 @@ body {
     text-align: center;
 }
 
+/* --- New Stylish Scanning Indicator --- */
+.scan-indicator {
+    display: flex;
+    align-items: center;
+    margin-left: 8px;
+    font-size: 12px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.dot-flashing {
+    position: relative;
+    width: 6px;
+    height: 6px;
+    border-radius: 5px;
+    background-color: #fff;
+    color: #fff;
+    animation: dot-flashing 1s infinite linear alternate;
+    animation-delay: .5s;
+    margin-left: 8px;
+    top: -1px; /* Align with text */
+}
+
+.dot-flashing::before,
+.dot-flashing::after {
+    content: '';
+    display: inline-block;
+    position: absolute;
+    top: 0;
+}
+
+.dot-flashing::before {
+    left: -10px;
+    width: 6px;
+    height: 6px;
+    border-radius: 5px;
+    background-color: #fff;
+    color: #fff;
+    animation: dot-flashing 1s infinite alternate;
+    animation-delay: 0s;
+}
+
+.dot-flashing::after {
+    left: 10px;
+    width: 6px;
+    height: 6px;
+    border-radius: 5px;
+    background-color: #fff;
+    color: #fff;
+    animation: dot-flashing 1s infinite alternate;
+    animation-delay: 1s;
+}
+
+@keyframes dot-flashing {
+    0% {
+        background-color: rgba(255, 255, 255, 0.9);
+        transform: scale(1);
+    }
+    50%,
+    100% {
+        background-color: rgba(255, 255, 255, 0.4);
+        transform: scale(0.8);
+    }
+}
+
+
 .status {
     display: flex;
     flex-direction: column;

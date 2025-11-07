@@ -79,6 +79,8 @@ class CognitoTablePopup {
             document.getElementById('status').style.display = 'none';
             document.getElementById('content').style.display = 'block';
             document.getElementById('tableList').innerHTML = '';
+            // Show the "scanning for more" indicator
+            document.getElementById('scanIndicator').style.display = 'flex';
         }
 
         this.detectedTables.push(table);
@@ -88,6 +90,8 @@ class CognitoTablePopup {
 
     handleScanComplete(response) {
         this.scanInProgress = false;
+        // Hide the "scanning for more" indicator
+        document.getElementById('scanIndicator').style.display = 'none';
         
         if (this.detectedTables.length === 0) {
             this.showNoTablesMessage(response.iframes || []);
@@ -122,6 +126,7 @@ class CognitoTablePopup {
         this.detectedTables = [];
         document.getElementById('tableList').innerHTML = '';
         document.getElementById('tableCount').textContent = '0';
+        document.getElementById('scanIndicator').style.display = 'none';
         this.scanCurrentPage(); // Re-trigger the scan process
     }
 
