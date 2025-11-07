@@ -44,22 +44,28 @@ class CognitoTablePopup {
                 return;
             }
 
-            // Ask the background script for cached data for the current tab
             const cachedTables = await chrome.runtime.sendMessage({ 
                 action: 'getCachedTableData',
                 tabId: tab.id 
             });
 
             if (cachedTables && Array.isArray(cachedTables)) {
-                // If we have all the data, display it immediately
+                // A valid cache exists, so we display it without showing any loaders.
+                document.getElementById('status').style.display = 'none';
+                document.getElementById('content').style.display = 'block';
+                document.getElementById('scanIndicator').style.display = 'none'; // Ensure it's hidden
+
                 if (cachedTables.length > 0) {
-                    cachedTables.forEach(table => this.handleTableFound(table));
+                    this.detectedTables = cachedTables;
+                    document.getElementById('tableCount').textContent = this.detectedTables.length;
+                    document.getElementById('tableList').innerHTML = ''; // Clear placeholder
+                    this.detectedTables.forEach(table => this.addTableToView(table));
                 } else {
-                    // Cache exists but is empty, so we know a scan found nothing
+                    // Cache is empty, meaning a previous scan found nothing.
                     this.handleScanComplete({ iframes: [] });
                 }
             } else {
-                // If no valid cache, start a new scan
+                // No valid cache, so we need to start a live scan.
                 this.scanCurrentPage();
             }
         } catch (error) {
@@ -76,6 +82,7 @@ class CognitoTablePopup {
         }
 
         if (this.detectedTables.length === 0) {
+            // This now only runs when the FIRST table of a NEW scan is found.
             document.getElementById('status').style.display = 'none';
             document.getElementById('content').style.display = 'block';
             document.getElementById('tableList').innerHTML = '';
@@ -90,7 +97,7 @@ class CognitoTablePopup {
 
     handleScanComplete(response) {
         this.scanInProgress = false;
-        // Hide the "scanning for more" indicator
+        // Hide the "scanning for more" indicator now that the scan is finished.
         document.getElementById('scanIndicator').style.display = 'none';
         
         if (this.detectedTables.length === 0) {
@@ -107,7 +114,6 @@ class CognitoTablePopup {
             
             this.showStatus('Scanning page for tables...');
             
-            // This message now expects a response with the final table list
             chrome.tabs.sendMessage(tab.id, { action: 'getTables' }).catch(error => {
                  console.error('Error initiating scan:', error);
                  this.showError('Could not start scan. Please refresh the page and try again.');
@@ -312,14 +318,8 @@ class CognitoTablePopup {
     }
 
     escapeCSV(field) {
-        // 1. Ensure the field is a string. Handle null/undefined by converting to an empty string.
         const stringField = String(field == null ? '' : field);
-    
-        // 2. Escape any double quotes inside the field by replacing them with two double quotes.
         const escapedField = stringField.replace(/"/g, '""');
-    
-        // 3. Enclose the entire result in double quotes to ensure it's treated as a single field,
-        //    which protects spaces, commas, and newlines within the content.
         return `"${escapedField}"`;
     }
 
@@ -362,7 +362,7 @@ class CognitoTablePopup {
         const statusEl = document.getElementById('status');
         const contentEl = document.getElementById('content');
         
-        statusEl.style.display = 'flex'; // Changed from 'block' to 'flex' for consistency
+        statusEl.style.display = 'flex';
         statusEl.innerHTML = `
             <div class="spinner"></div>
             <span class="status-text">${message}</span>
@@ -375,7 +375,7 @@ class CognitoTablePopup {
         const statusEl = document.getElementById('status');
         const contentEl = document.getElementById('content');
         
-        statusEl.style.display = 'block'; // Block display is fine for the error message
+        statusEl.style.display = 'block';
         statusEl.innerHTML = `
             <div class="error-message">
                 <strong>Error:</strong> ${message}
