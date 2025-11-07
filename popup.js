@@ -51,7 +51,7 @@ class CognitoTablePopup {
             });
 
             if (cachedTables && Array.isArray(cachedTables)) {
-                // If we have cached data, display it immediately
+                // If we have all the data, display it immediately
                 if (cachedTables.length > 0) {
                     cachedTables.forEach(table => this.handleTableFound(table));
                 } else {
@@ -357,10 +357,10 @@ class CognitoTablePopup {
         const statusEl = document.getElementById('status');
         const contentEl = document.getElementById('content');
         
-        statusEl.style.display = 'block';
+        statusEl.style.display = 'flex'; // Changed from 'block' to 'flex' for consistency
         statusEl.innerHTML = `
             <div class="spinner"></div>
-            <span>${message}</span>
+            <span class="status-text">${message}</span>
         `;
         
         contentEl.style.display = 'none';
@@ -370,7 +370,7 @@ class CognitoTablePopup {
         const statusEl = document.getElementById('status');
         const contentEl = document.getElementById('content');
         
-        statusEl.style.display = 'block';
+        statusEl.style.display = 'block'; // Block display is fine for the error message
         statusEl.innerHTML = `
             <div class="error-message">
                 <strong>Error:</strong> ${message}
