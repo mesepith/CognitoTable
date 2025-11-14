@@ -1,3 +1,6 @@
+/*
+@author: Zahir
+*/
 class CognitoTablePopup {
     constructor() {
         this.detectedTables = [];
